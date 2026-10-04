@@ -1,31 +1,21 @@
 # ManwhaHDFyer
 
-AI-powered manhwa upscaler built for readers who are tired of squinting at compressed webtoon panels. Takes low-quality CBZ chapters downloaded from manga reader apps and produces crisp, high-resolution output using Real-ESRGAN with 4x-UltraSharp.
+AI-powered manhwa upscaler built for readers who are tired of squinting at compressed webtoon panels. Takes low-quality CBZ chapters downloaded from manga reader apps and produces crisp 2× output using an RRDBNet model (4x-UltraSharp) running on a custom FP16 inference engine.
 
-**33 min/chapter → 6.6 min locally, ~1.5 min on cloud A100.** Zero temp files. 530MB output → 29MB. No doubled panels.
-
-Built from scratch as a learning project in ML inference, image processing, and software architecture.
-
----
-
-## Before / After
-
-| Source (720px, compressed JPEG) | Upscaled (1440px, 2x, JPEG 92) |
-|---|---|
-| Blurry line art, compression artifacts, banding | Sharp lines, clean gradients, readable text |
+Built from scratch as a learning project in ML inference, GPU memory profiling, image processing, and software architecture.
 
 ---
 
 ## Features
 
-- **GPU-accelerated upscaling** — FP16 inference on NVIDIA GPUs via Real-ESRGAN
-- **Smart chunking** — Automatically detects tall scroll panels (720×4000+) and splits them into GPU-friendly chunks with feathered blending. Normal-ratio images go through direct upscale.
-- **Zero temp files** — Images stream from source CBZ through GPU directly into output CBZ. No intermediate files touch disk.
-- **Post-upscale sharpening** — Unsharp mask applied after the model runs, preserving line art crispness without amplifying source compression artifacts
-- **Black area cleanup** — Near-black pixels flattened to pure black, eliminating patchiness from model hallucination on solid regions
-- **Credit page skip** — Last N pages per chapter pass through without GPU processing
-- **Resume support** — Skips chapters already processed. Safe to restart interrupted batch jobs.
-- **Cloud-ready** — Same code runs locally or on Lambda.ai / Vast.ai GPU instances
+- **Custom inference engine.** The RRDBNet forward pass runs directly in PyTorch FP16. Real-ESRGAN is no longer a runtime dependency; only the architecture class comes from `basicsr`.
+- **GPU profiler.** On first run it measures peak VRAM and latency for every page shape in your library and caches the results per GPU model.
+- **VRAM-aware chunking.** Tall webtoon pages are sliced into the largest strips the GPU can safely hold. The strip size comes from a linear VRAM model fitted to profiler data ([below](#the-vram-model)).
+- **Batched inference.** Same-shape chunks from any page are stacked into one forward pass, sized by the profiler's safe batch size. This pays off on large GPUs.
+- **Seamless stitching.** Strips overlap by 128 px and are linearly alpha-blended back together, so there are no seams or doubled panels.
+- **Post-processing.** An unsharp mask restores line art, and near-black pixels are clamped to pure black to remove model blotchiness in dark areas.
+- **Crash-safe resume.** Chapters are written to `.part` files and renamed only when complete, and finished chapters are skipped on restart.
+- **Cloud-ready.** The same code runs on a laptop GPU or a datacenter card; each GPU gets its own profile.
 
 ---
 
@@ -33,239 +23,222 @@ Built from scratch as a learning project in ML inference, image processing, and 
 
 ```
 ManwhaHDFyer/
-├── core/                    ← The brain (delivery-agnostic)
-│   ├── config.py            ← Dataclass-based settings (engine, output, paths)
-│   ├── engine.py            ← Model loading, smart chunking, upscaling, sharpening
-│   ├── extractor.py         ← CBZ → images (generator, no temp files)
-│   └── packager.py          ← Images → CBZ (stream to zip, context manager)
-├── pipeline/                ← Orchestration
-│   └── batch.py             ← Chapter loop, logging, timing, skip logic
-├── models/                  ← Weight files (gitignored, download manually)
-├── Real-ESRGAN/             ← Cloned + patched inference library (gitignored)
-├── legacy/                  ← Original MVP (preserved as baseline)
-├── tests/                   ← Test stubs
-├── main.py                  ← CLI entry point
-└── requirements.txt
+├── main.py                    ← Entry point: profile (once per GPU), then process the library
+├── core/
+│   ├── extractor.py           ← CBZ → decoded images
+│   ├── model_loader.py        ← Builds RRDBNet, loads weights, FP16 on CUDA
+│   ├── packager.py            ← Images → output CBZ (JPEG/PNG)
+│   └── config.py              ← Settings dataclasses (not yet wired into the v2 pipeline)
+├── profiler/
+│   ├── scanner.py             ← Reads page dimensions from CBZ headers, no decoding
+│   ├── runner.py              ← Measures VRAM + latency per shape; VRAM estimate formula
+│   ├── benchmark.py           ← Benchmark map, batch-size lookup, max chunk height
+│   └── cache.py               ← Per-GPU JSON cache in cache/
+├── inference/
+│   ├── chunker.py             ← Page → overlapping strips (ChunkMeta)
+│   ├── batcher.py             ← Groups same-shape chunks into VRAM-safe batches
+│   └── engine.py              ← Pre/post-processing + batched forward pass
+├── pipeline/
+│   ├── page_buffer.py         ← Collects a page's chunks as they return from the GPU
+│   └── reassembler.py         ← Stitches chunks with overlap blending
+├── postprocessing/
+│   ├── sharpen.py             ← Unsharp mask
+│   └── cleanup.py             ← Near-black → black
+├── plotter.py                 ← Fits the VRAM model and draws vram_vs_pixels_detailed.png
+├── test.py                    ← Chunk/reassemble round-trip test (no inference)
+├── legacy/                    ← Phase 1 code, kept for reference (does not run)
+├── models/                    ← Weight files (gitignored, download manually)
+├── cache/                     ← GPU profiles (gitignored, generated)
+├── Manwhas/                   ← Input library (gitignored)
+└── results/                   ← Output, mirrors Manwhas/ (gitignored)
 ```
 
-**Data flow for a single page:**
+**Data flow for one chapter:**
+
 ```
-CBZ on disk
-  → extractor reads zip entry → decodes to numpy array (in memory)
-    → engine checks aspect ratio → direct or chunked upscale on GPU
-      → post-sharpen → black cleanup
-    → packager encodes to JPEG bytes → writes into output zip
-      → memory freed, next page
-→ Output CBZ on disk (only file written)
+CBZ → decode pages
+    → chunk each page (single pass if it fits, else overlapping strips)
+    → group same-shape chunks into batches → FP16 RRDBNet 4× on GPU
+    → collect chunks per page → stitch with blended overlaps
+    → sharpen → black cleanup → Lanczos downscale to 2×
+    → JPEG q92 → output CBZ (.part, renamed on completion)
 ```
+
+**First run on a new GPU:**
+
+```
+scan library headers → unique widths + max height
+    → profile each width × {128, 256, 512, 1024, 2048, max} px heights
+    → peak VRAM, median latency, safe batch size → cache/<gpu>.json
+```
+
+---
+
+## The VRAM model
+
+To pick strip sizes, the chunker needs to know how much VRAM a forward pass will use **before** it runs. An OOM on Windows/WSL doesn't fail cleanly: the driver spills into shared system memory and the run thrashes. So guessing wrong costs minutes, not a quick exception.
+
+The profiler measured peak VRAM for RRDBNet-23 (FP16) across every page width in the library and heights from 128 to 1024 px on an RTX 4060 Laptop (8 GB). Plotting peak VRAM against total pixel count gives an almost perfectly straight line:
+
+![Peak VRAM vs pixel count on RTX 4060 Laptop](vram_vs_pixels_detailed.png)
+
+```
+VRAM_MB ≈ 0.0085 × (W × H) + 32.1        R² = 1.0000
+```
+
+- **Slope, 0.0085 MB/pixel (≈ 8.5 MB per 1000 px):** activation memory. RRDBNet keeps every intermediate feature map at the input resolution, so memory grows linearly with pixel count.
+- **Intercept, 32.1 MB:** fixed cost (model weights in FP16 plus CUDA workspace).
+- **Width and height don't matter separately.** Points with different shapes but the same pixel count land on the same line (e.g. 1080×512 and 545×1024), so one variable is enough.
+
+### How the formula is used
+
+| Where | Use |
+|---|---|
+| `profiler/runner.estimate_shape_vram` | The formula itself. |
+| Profiler pre-flight | Shapes estimated above **75%** of VRAM are marked invalid without being run, which avoids the WSL thrash. This is why `709×1024` shows as "OOM" in the 4060 cache. |
+| `inference/chunker.chunk_page` | A page under 75% of VRAM is upscaled in one pass. |
+| `profiler/benchmark.get_max_chunk_height` | Solves the formula for height: `H = (0.75·VRAM − 32.1) / (0.0085·W)`. On the 4060 that's 898 rows for an 800 px wide page, or 998 for 720 px. |
+| `profiler/benchmark.build_map` | Safe batch size = `floor(0.85·VRAM / peak)`, from measured peaks. |
+
+The 75% budget leaves room for the 4× output tensor and allocator fragmentation; the 85% line caps batch size. Both are drawn on the plot.
+
+### Validation
+
+The current 4060 profile (re-run 2026-05-16) agrees with the formula to within **12 MB** at 35 of 36 measured shapes; refitting those 35 points gives slope 0.00852, intercept 33.2, R² = 0.9999996. The one outlier is `690×1024`, which measured 4456 MB against a predicted ~6040 MB (the original April profile measured ~6050 MB there). The formula is conservative at that point, so it's safe, but the measurement is worth re-checking.
+
+The constants were fitted on the 4060 and are used unchanged on other GPUs. Activation memory per pixel depends on the model, not the card, so they should carry over, but they haven't been re-verified on the H200.
+
+To regenerate the plot from your own profile: `python plotter.py` (reads `cache/rtx-4060-laptop-gpu.json`).
+
+---
+
+## Performance
+
+Measured on an RTX 4060 Laptop (8 GB), 800 px wide pages:
+
+| | |
+|---|---|
+| One 800×898 strip (warm) | ~3.7 s |
+| One 800×4700 page | ~20 s |
+| 35-page chapter | ~12–13 min |
+
+The GPU is compute-bound: per-pixel cost is roughly flat (2.9–4.3 µs/px) across tile sizes, and at max strip height only one strip fits per batch, so batching doesn't help on 8 GB cards. It's built for large GPUs; an H200 profile allows batches of up to 225.
+
+The first time each new strip shape appears, cuDNN autotuning adds about 7 s.
 
 ---
 
 ## Requirements
 
-- Python 3.10+
-- NVIDIA GPU with CUDA support
-- 8GB+ VRAM recommended (tested on RTX 4060 Laptop 8GB, A100 40GB)
+- Python 3.10+ (developed on 3.12)
+- NVIDIA GPU with CUDA (no CPU fallback)
+- 8 GB+ VRAM recommended
 
 ---
 
 ## Setup
 
-### 1. Clone the repo
-
 ```bash
-git clone https://github.com/yourusername/ManwhaHDFyer.git
-cd ManwhaHDFyer
-```
-
-### 2. Create a virtual environment
-
-```bash
+git clone https://github.com/Sidrawat11/comic-upscaler.git
+cd comic-upscaler
 python -m venv venv
-source venv/bin/activate        # Linux/macOS/WSL
-# or
-venv\Scripts\activate           # Windows
+source venv/bin/activate          # Windows: venv\Scripts\activate
 ```
 
-### 3. Install PyTorch with CUDA
-
-Visit [pytorch.org](https://pytorch.org/get-started/locally/) and get the install command for your CUDA version. Example for CUDA 12.1:
+**PyTorch with CUDA:** get the command for your CUDA version from [pytorch.org](https://pytorch.org/get-started/locally/), e.g.:
 
 ```bash
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 ```
 
-### 4. Clone and install Real-ESRGAN
-
-The pip version of `realesrgan` has broken dependencies as of 2025. Clone the repo and install in editable mode so you can patch issues:
+**Other dependencies:**
 
 ```bash
-git clone https://github.com/xinntao/Real-ESRGAN.git
-cd Real-ESRGAN
-pip install -e .
-cd ..
+pip install basicsr opencv-python imagesize tqdm numpy matplotlib
 ```
 
-**Known fix required:** If you see `ModuleNotFoundError: No module named 'torchvision.transforms.functional_tensor'`, edit the file that throws the error and replace:
+**`basicsr` fix:** if importing it fails with `No module named 'torchvision.transforms.functional_tensor'`, edit `site-packages/basicsr/data/degradations.py` and change
 
 ```python
 from torchvision.transforms.functional_tensor import rgb_to_grayscale
 ```
 
-with:
+to
 
 ```python
 from torchvision.transforms.functional import rgb_to_grayscale
 ```
 
-### 5. Install remaining dependencies
-
-```bash
-pip install basicsr opencv-python Pillow
-```
-
-**Note:** If you get NumPy errors, downgrade to v1:
-
-```bash
-pip install "numpy<2"
-```
-
-### 6. Download the model weights
-
-Download **4x-UltraSharp.pth** from [OpenModelDB](https://openmodeldb.info/models/4x-UltraSharp) and place it in the `models/` directory:
-
-```
-models/4x-UltraSharp.pth
-```
+**Model weights:** download **4x-UltraSharp.pth** from [OpenModelDB](https://openmodeldb.info/models/4x-UltraSharp) into `models/`.
 
 ---
 
 ## Usage
 
-### Basic — one chapter test
+Put your library in `Manwhas/` (any folder structure; every `*.cbz` is found recursively), then:
 
 ```bash
-python main.py --comic-folder "Comic Name" --limit 1
+python main.py
 ```
 
-### Full batch — all chapters
+On the first run with a new GPU it profiles first. That takes a few minutes and is cached in `cache/<gpu>.json`; delete the file to re-profile. Output goes to `results/`, mirroring the input tree. Interrupted runs resume where they stopped.
+
+Paths and settings are currently hard-coded in `main.py`; there is no CLI yet.
+
+**Test:**
 
 ```bash
-python main.py --comic-folder "Comic Name"
+python test.py [path/to/chapter.cbz]
 ```
 
-### All options
-
-```bash
-python main.py \
-  --comic-folder "My Manhwa Folder" \
-  --scale 2 \
-  --format jpg \
-  --quality 92 \
-  --limit 0
-```
-
-| Argument | Default | Description |
-|---|---|---|
-| `--comic-folder` | *required* | Path to folder containing CBZ files |
-| `--scale` | 2 | Upscale factor (2 or 4) |
-| `--format` | jpg | Output format: `jpg` or `png` |
-| `--quality` | 92 | JPEG quality 1-100 (ignored for PNG) |
-| `--limit` | 0 | Max chapters to process (0 = all) |
-
-Results are saved to `results/` with the same filenames as the source CBZ files.
+This chunks every page, uses a nearest-neighbour resize as a stand-in for the model, reassembles, and checks the output is pixel-exact. It's fast because no inference runs.
 
 ---
 
-## Cloud Deployment (Lambda.ai / Vast.ai)
+## How it works
 
-For large batches, rent a cloud GPU. Same code, bigger hardware.
+**The model:** 4x-UltraSharp is an RRDBNet (Residual-in-Residual Dense Block Network, 23 blocks) trained with GAN methods. At inference time only the generator runs, a deep CNN that maps low-res pixels to 4× high-res output. The final 2× output comes from a Lanczos downscale of the 4× result, which also suppresses model artifacts.
 
-### Quick start on Lambda
+**Chunking:** manhwa pages are typically 720–800 px wide and 4000–5000 px tall, far too big for one forward pass on consumer GPUs. The chunker cuts each page into the tallest strips that fit the VRAM budget, with 128 px overlaps. After upscaling, each overlap is linearly blended (top strip fading out, bottom strip fading in), so seams disappear.
 
-```bash
-# SSH into your instance
-ssh -i ~/.ssh/your-key.pem ubuntu@INSTANCE-IP
-
-# Upload your project
-scp -i ~/.ssh/your-key.pem -r ManwhaHDFyer/ ubuntu@INSTANCE-IP:~/
-
-# On the instance: install dependencies
-cd ~/ManwhaHDFyer
-pip install basicsr opencv-python Pillow "numpy<2"
-cd Real-ESRGAN && pip install -e . && cd ..
-
-# Fix the torchvision import if needed (see Setup step 4)
-
-# Run
-python main.py --comic-folder "The Legend of the Northern Blade"
-
-# Download results locally, then TERMINATE the instance
-scp -i ~/.ssh/your-key.pem -r ubuntu@INSTANCE-IP:~/ManwhaHDFyer/results/ ./cloud_results/
-```
-
-### Performance benchmarks
-
-| GPU | Per Chapter (35 pages) | Per Chapter (86 pages) | 93 Chapters | Cost |
-|---|---|---|---|---|
-| RTX 4060 Laptop (8GB) | ~6.6 min | ~15 min | ~11 hours | Free |
-| A100 SXM4 (40GB) | ~1.5 min | ~4 min | ~2.5 hours | ~$3-5 |
-| GH200 (96GB) | ~0.5 min | ~1.5 min | ~1 hour | ~$2-3 |
+**Post-processing:** a gentle unsharp mask (strength 0.3, radius 1.0) recovers line detail the model softens. Pixels whose channels are all below 15 become pure black, which removes patchiness in solid dark regions.
 
 ---
 
-## How It Works
+## Project history
 
-**The model:** 4x-UltraSharp is an RRDBNet (Residual-in-Residual Dense Block Network) trained using GAN (Generative Adversarial Network) methods. At inference time, only the generator runs — a deep CNN that transforms low-res pixels into high-res output. The model was trained at 4x scale; 2x output is achieved by downscaling the 4x result.
-
-**Smart chunking:** Manhwa pages are typically 720×4000+ pixels — extreme aspect ratios that break standard tiling algorithms. The engine checks each image's aspect ratio: normal images go through Real-ESRGAN's built-in tiler, while tall panels are sliced into ~720px vertical chunks with 128px overlap, upscaled individually, then stitched with linear alpha blending across the overlap zones to eliminate seams.
-
-**Post-processing:** After upscaling, a gentle unsharp mask recovers line art detail that the model softens. Near-black pixels (RGB all below 15) are clamped to pure black to eliminate patchiness in solid dark areas.
-
----
-
-## Project History
-
-Started as a 180-line monolithic script (preserved in `legacy/mvp_upscaler.py`) that took 33 minutes per chapter, wrote 580MB of temp files, and produced doubled panels from a buggy stitching algorithm. Rebuilt from scratch with modular architecture, generator-based streaming, feathered blending, and cloud deployment support.
+- **Phase 0: MVP** (`legacy/mvp_upscaler.py`). A 180-line script using Real-ESRGAN: 33 min/chapter, 580 MB of temp files, and a stitching bug that doubled panels.
+- **Phase 1: modular rewrite** (`legacy/engine.py`, `legacy/batch.py`). Streaming CBZ → CBZ with no temp files, feathered blending, FP16, sharpening, resume support, and a CLI. Still wrapped Real-ESRGAN, with a fixed 720 px chunk size and aspect-ratio-based chunking.
+- **Phase 2: current.** Replaced Real-ESRGAN with a custom engine, added the GPU profiler and VRAM model, VRAM-sized chunking, cross-page batching, and the page buffer/reassembler.
 
 ---
 
 ## Roadmap
 
-### Completed
-- [x] MVP upscaler (proof of concept)
-- [x] Modular architecture (core/pipeline separation)
-- [x] Feathered blending for chunk stitching
-- [x] FP16 inference
-- [x] Post-sharpen + black area fix
-- [x] Batch processing with resume
-- [x] Cloud GPU deployment
+### Done
+- [x] MVP upscaler
+- [x] Modular architecture
+- [x] Feathered blending, FP16 inference, sharpening + black cleanup
+- [x] Custom inference engine (Real-ESRGAN removed)
+- [x] GPU profiler + VRAM model + per-GPU cache
+- [x] VRAM-aware chunking and batched inference
+- [x] Crash-safe resume
 
-### In Progress
-- [ ] Desktop GUI comparer (Tauri + React)
-  - [ ] Side-by-side image comparison with slider
-  - [ ] Synchronized zoom and pan
-  - [ ] Drag-and-drop image loading
-  - [ ] Image metadata display (resolution, file size, format)
-  - [ ] Keyboard shortcuts
-
-### Up Next
-- [ ] Custom inference wrapper (replace Real-ESRGAN dependency)
+### Next
+- [ ] CLI wired to `core/config.py` (paths, model, limit, format/quality)
+- [ ] Restore credit-page skip and file logging from Phase 1
+- [ ] `requirements.txt`
+- [ ] Pad tail strips to a fixed height (one cuDNN tune per width; lets tails batch)
+- [ ] Overlap CPU work (decode, sharpen, encode) with GPU inference
+- [ ] Full library run on H200
 - [ ] Edge-aware sharpening (sharpen lines, preserve flat areas)
-- [ ] GPU batching (multiple images per inference call)
+- [ ] pytest suite (lookup interpolation, chunker edge cases, packager)
 
-### Future — Pipeline Features
-- [ ] Model selection (swap between different upscaling models)
-- [ ] Multiple sharpening algorithms (unsharp mask, Laplacian, bilateral, edge-aware)
-- [ ] Batch and single image mode through the GUI
-- [ ] Live config controls (sharpening strength, tile size, scale factor)
-- [ ] CPU inference fallback for users without a GPU
-
-### Future — Infrastructure
+### Future
+- [ ] Model selection (e.g. RealESRGAN anime_6B)
+- [ ] Desktop GUI comparer (Tauri + React): slider, synced zoom/pan, drag-and-drop
+- [ ] CPU inference fallback
 - [ ] Reverse proxy for real-time Mihon integration (Suwayomi-based)
-- [ ] Queue-based processing with approval workflow
-- [ ] Cloud deployment automation
-- [ ] Support for multiple model architectures (anime-specific, photo, etc.)
 
 ---
 
