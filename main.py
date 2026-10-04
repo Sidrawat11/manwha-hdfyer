@@ -104,8 +104,11 @@ def process_all(manwha_dir: Path, output_dir: Path, model_path: Path, scale: int
             tqdm.write(f"Skipping, already processed: {relative}")
             continue
 
+        # Write to .part and rename on success, so an interrupted chapter isn't mistaken for a finished one on resume.
         chapter_start = time.perf_counter()
-        process_chapter_v2(cbz_path, model, benchmark_map, output_path, scale)
+        part_path = output_path.with_name(output_path.name + ".part")
+        process_chapter_v2(cbz_path, model, benchmark_map, part_path, scale)
+        part_path.replace(output_path)
         completed += 1
         elapsed = time.perf_counter() - chapter_start
         tqdm.write(f"Done: {relative} in {elapsed:.1f}s")

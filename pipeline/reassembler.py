@@ -1,7 +1,7 @@
-"""Output router.
+"""Chunk stitcher.
 
-Reads chunk tags from completed inference batches and deposits each output
-tensor into the correct PageBuffer.
+Joins the upscaled chunks of one page back into a full page, linearly blending
+each overlap region to hide seams.
 """
 
 import numpy as np
@@ -18,6 +18,9 @@ def _blend_overlap(top_region: np.ndarray, bottom_region: np.ndarray) -> np.ndar
 def reassemble(chunks: list[tuple[np.ndarray, ChunkMeta]], scale: int = 4) -> np.ndarray:
     """Stitches upscaled chunks into a full page with overlap blending. Receives paired upscaled arrays and their ChunkMeta, returns the reconstructed page."""
     chunk_body, chunk_meta = chunks[0]
+    # Unchunked page: overlap_bottom is 0, and [:-0] would slice to an empty array.
+    if len(chunks) == 1:
+        return chunk_body
     pieces = [chunk_body[:-chunk_meta.overlap_bottom*scale]]
     for i in range(1, len(chunks)):
         chunk_A, meta_A = chunks[i - 1]

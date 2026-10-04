@@ -3,6 +3,7 @@
 import numpy as np
 import cv2
 import zipfile
+from pathlib import PurePosixPath
 
 
 class Packager:
@@ -30,10 +31,10 @@ class Packager:
         return False
 
     def add_image(self, filename, img: np.ndarray):
-        """Encode and add an image array to the archive."""
+        """Encode and add an image array to the archive, renaming the extension to match the encoded format."""
         success, buffer = cv2.imencode(self.format, img, [self.fmt, self.quality])
         if success:
-            self.zip_file.writestr(filename, buffer.tobytes())
+            self.zip_file.writestr(str(PurePosixPath(filename).with_suffix(self.format)), buffer.tobytes())
 
     def add_raw(self, filename, raw_bytes):
         """Write raw bytes directly into the archive without re-encoding."""
