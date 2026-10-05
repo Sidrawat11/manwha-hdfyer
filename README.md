@@ -145,16 +145,16 @@ python -m venv venv
 source venv/bin/activate          # Windows: venv\Scripts\activate
 ```
 
-**PyTorch with CUDA:** get the command for your CUDA version from [pytorch.org](https://pytorch.org/get-started/locally/), e.g.:
+**PyTorch with CUDA first:** pip's default index ships CPU-only builds, so install torch from the PyTorch CUDA index (pick your CUDA version on [pytorch.org](https://pytorch.org/get-started/locally/)):
 
 ```bash
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+pip install torch==2.10.0 torchvision==0.25.0 --index-url https://download.pytorch.org/whl/cu128
 ```
 
-**Other dependencies:**
+**Then the rest:**
 
 ```bash
-pip install basicsr opencv-python imagesize tqdm numpy matplotlib
+pip install -r requirements.txt
 ```
 
 **`basicsr` fix:** if importing it fails with `No module named 'torchvision.transforms.functional_tensor'`, edit `site-packages/basicsr/data/degradations.py` and change
@@ -227,7 +227,7 @@ This chunks every page, uses a nearest-neighbour resize as a stand-in for the mo
 ### Next
 - [ ] CLI wired to `core/config.py` (paths, model, limit, format/quality)
 - [ ] Restore credit-page skip and file logging from Phase 1
-- [ ] `requirements.txt`
+- [x] `requirements.txt`
 - [ ] Pad tail strips to a fixed height (one cuDNN tune per width; lets tails batch)
 - [ ] Overlap CPU work (decode, sharpen, encode) with GPU inference
 - [ ] Full library run on H200

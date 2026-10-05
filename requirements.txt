@@ -1,0 +1,13 @@
+# Install torch/torchvision from the PyTorch CUDA index FIRST, e.g.:
+#   pip install torch==2.10.0 torchvision==0.25.0 --index-url https://download.pytorch.org/whl/cu128
+# then:
+#   pip install -r requirements.txt
+
+torch==2.10.0
+torchvision==0.25.0  # not imported directly; required by basicsr
+basicsr==1.4.2       # RRDBNet architecture only
+opencv-python==4.13.0.92
+numpy==2.4.2
+imagesize==2.0.0
+tqdm==4.67.3
+matplotlib==3.10.8   # plotter.py only
