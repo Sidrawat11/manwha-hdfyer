@@ -139,8 +139,8 @@ The first time each new strip shape appears, cuDNN autotuning adds about 7 s.
 ## Setup
 
 ```bash
-git clone https://github.com/Sidrawat11/comic-upscaler.git
-cd comic-upscaler
+git clone https://github.com/Sidrawat11/manwha-hdfyer.git
+cd manwha-hdfyer
 python -m venv venv
 source venv/bin/activate          # Windows: venv\Scripts\activate
 ```
