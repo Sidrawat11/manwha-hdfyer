@@ -29,3 +29,6 @@ Real-ESRGAN/experiments/*
 # Editor junk
 .vscode/
 .idea/
+
+# Experiment outputs
+experiments/out/
