@@ -72,12 +72,13 @@ def upscale(image: np.ndarray, model: torch.nn.Module, scale: int = 4) -> np.nda
     return img
 
 
-def batch_upscale(chunks: list[ChunkMeta], model: torch.nn.Module, scale: int = 4) -> list[tuple[np.ndarray, ChunkMeta]]:
-    """
-    Upscales a batch of same-shape chunks in a single forward pass. 
-    Preprocesses each chunk, concatenates into one tensor, runs model once, splits and postprocesses each result.
-    Returns paired upscaled arrays and their ChunkMetas.
-    """
+def _is_oom(error: RuntimeError) -> bool:
+    """True for PyTorch's OOM and for the driver's. With NVIDIA's "Prefer No Sysmem Fallback" it arrives as a plain CUDA RuntimeError."""
+    return isinstance(error, torch.cuda.OutOfMemoryError) or "out of memory" in str(error).lower()
+
+
+def _forward_batch(chunks: list[ChunkMeta], model: torch.nn.Module, scale: int) -> list[tuple[np.ndarray, ChunkMeta]]:
+    """One forward pass over a batch of same-shape chunks."""
     preprocessed_chunks = []
     for chunk in chunks:
         tensor = _preprocess(chunk.page_slice)
@@ -95,3 +96,22 @@ def batch_upscale(chunks: list[ChunkMeta], model: torch.nn.Module, scale: int = 
         results.append((_postprocess(tensor), meta))
 
     return results
+
+
+def batch_upscale(chunks: list[ChunkMeta], model: torch.nn.Module, scale: int = 4) -> list[tuple[np.ndarray, ChunkMeta]]:
+    """
+    Upscales a batch of same-shape chunks in a single forward pass. 
+    Preprocesses each chunk, concatenates into one tensor, runs model once, splits and postprocesses each result.
+    On out-of-memory the batch is split in half and each half retried; a batch of 1 that still fails re-raises.
+    Returns paired upscaled arrays and their ChunkMetas.
+    """
+    try:
+        return _forward_batch(chunks, model, scale)
+    except RuntimeError as e:
+        if not _is_oom(e) or len(chunks) == 1:
+            raise
+
+    # Retry outside the except block, so the failed pass's tensors are no longer held by the traceback.
+    torch.cuda.empty_cache()
+    mid = len(chunks) // 2
+    return batch_upscale(chunks[:mid], model, scale) + batch_upscale(chunks[mid:], model, scale)

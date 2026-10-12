@@ -1,3 +1,6 @@
+import os
+# Must be set before torch is imported: lets the allocator grow segments instead of fragmenting.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import cv2
 import time
 import torch
@@ -109,6 +112,7 @@ def process_all(manwha_dir: Path, output_dir: Path, model_path: Path, scale: int
         part_path = output_path.with_name(output_path.name + ".part")
         process_chapter_v2(cbz_path, model, benchmark_map, part_path, scale)
         part_path.replace(output_path)
+        torch.cuda.empty_cache()
         completed += 1
         elapsed = time.perf_counter() - chapter_start
         tqdm.write(f"Done: {relative} in {elapsed:.1f}s")
