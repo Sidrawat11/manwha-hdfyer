@@ -15,11 +15,25 @@ def _blend_overlap(top_region: np.ndarray, bottom_region: np.ndarray) -> np.ndar
     blended = top_region * (1 - alpha) + bottom_region * alpha
     return blended.astype(np.uint8)
 
+def _check_height(stitched: np.ndarray, expected_height: int, chunks: list[tuple[np.ndarray, ChunkMeta]]) -> None:
+    """Raises if the stitched page isn't as tall as the span its chunks cover."""
+    # Rows are silently duplicated or dropped when a chunk's overlap_top + overlap_bottom exceeds its height.
+    if stitched.shape[0] != expected_height:
+        meta = chunks[0][1]
+        raise AssertionError(
+            f"reassemble: page {meta.page_id} stitched to {stitched.shape[0]} rows, expected {expected_height} "
+            f"({len(chunks)} chunks spanning rows {meta.y_start}-{chunks[-1][1].y_end}). "
+            "Check that no chunk has overlap_top + overlap_bottom greater than its height."
+        )
+
+
 def reassemble(chunks: list[tuple[np.ndarray, ChunkMeta]], scale: int = 4) -> np.ndarray:
     """Stitches upscaled chunks into a full page with overlap blending. Receives paired upscaled arrays and their ChunkMeta, returns the reconstructed page."""
     chunk_body, chunk_meta = chunks[0]
+    expected_height = (chunks[-1][1].y_end - chunk_meta.y_start) * scale
     # Unchunked page: overlap_bottom is 0, and [:-0] would slice to an empty array.
     if len(chunks) == 1:
+        _check_height(chunk_body, expected_height, chunks)
         return chunk_body
     pieces = [chunk_body[:-chunk_meta.overlap_bottom*scale]]
     for i in range(1, len(chunks)):
@@ -35,4 +49,6 @@ def reassemble(chunks: list[tuple[np.ndarray, ChunkMeta]], scale: int = 4) -> np
 
         pieces.extend([blended, img_B])
     
-    return np.concatenate(pieces, axis=0)
+    stitched = np.concatenate(pieces, axis=0)
+    _check_height(stitched, expected_height, chunks)
+    return stitched

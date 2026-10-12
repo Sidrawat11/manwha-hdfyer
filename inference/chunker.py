@@ -24,7 +24,7 @@ class ChunkMeta:
     overlap_top: int
     overlap_bottom: int
 
-def chunk_page(image: np.ndarray, page_id: int, benchmark_map: dict, overlap=DEFAULT_OVERLAP) -> list[ChunkMeta]:
+def chunk_page(image: np.ndarray, page_id: int, benchmark_map: dict, overlap: int = DEFAULT_OVERLAP) -> list[ChunkMeta]:
     h, w = image.shape[:2]
 
     available_vram = benchmark_map["available_vram"]
@@ -41,7 +41,7 @@ def chunk_page(image: np.ndarray, page_id: int, benchmark_map: dict, overlap=DEF
 
     while y_start < h:
         y_end = y_start + max_chunk_height
-        overlap_top = DEFAULT_OVERLAP if y_start > 0 else 0
+        overlap_top = overlap if y_start > 0 else 0
         if y_end > h:
             chunk = image[y_start:,:]
             results.append(ChunkMeta(page_id, chunk, ch_index, 0, y_start, h, overlap_top, 0))
@@ -50,11 +50,11 @@ def chunk_page(image: np.ndarray, page_id: int, benchmark_map: dict, overlap=DEF
         chunk = image[y_start : y_end, :]
 
         if y_start == 0:
-            results.append(ChunkMeta(page_id, chunk, ch_index, 0, y_start, y_end, 0, DEFAULT_OVERLAP))
+            results.append(ChunkMeta(page_id, chunk, ch_index, 0, y_start, y_end, 0, overlap))
         else:
-            results.append(ChunkMeta(page_id, chunk, ch_index, 0, y_start, y_end, overlap_top, DEFAULT_OVERLAP))
+            results.append(ChunkMeta(page_id, chunk, ch_index, 0, y_start, y_end, overlap_top, overlap))
         
-        y_start = y_end - DEFAULT_OVERLAP
+        y_start = y_end - overlap
         ch_index += 1
     
     total_chunks = len(results)
