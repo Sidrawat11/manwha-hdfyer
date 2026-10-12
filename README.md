@@ -10,9 +10,9 @@ Built from scratch as a learning project in ML inference, GPU memory profiling, 
 
 - **Custom inference engine.** The RRDBNet forward pass runs directly in PyTorch FP16. Real-ESRGAN is no longer a runtime dependency; only the architecture class comes from `basicsr`.
 - **GPU profiler.** On first run it measures peak VRAM and latency for every page shape in your library and caches the results per GPU model.
-- **VRAM-aware chunking.** Tall webtoon pages are sliced into the largest strips the GPU can safely hold. The strip size comes from a linear VRAM model fitted to profiler data ([below](#the-vram-model)).
+- **VRAM-aware chunking.** Tall webtoon pages are sliced into fixed-shape strips (about 512 rows for an 800 px wide page), never taller than the GPU can safely hold. The limit comes from a linear VRAM model fitted to profiler data ([below](#the-vram-model)).
 - **Batched inference.** Same-shape chunks from any page are stacked into one forward pass, sized by the profiler's safe batch size. This pays off on large GPUs.
-- **Seamless stitching.** Strips overlap by 128 px and are linearly alpha-blended back together, so there are no seams or doubled panels.
+- **Seamless stitching.** Strips overlap by about 32 rows and are linearly alpha-blended back together, so there are no seams or doubled panels.
 - **Post-processing.** An unsharp mask restores line art, and near-black pixels are clamped to pure black to remove model blotchiness in dark areas.
 - **Crash-safe resume.** Chapters are written to `.part` files and renamed only when complete, and finished chapters are skipped on restart.
 - **Cloud-ready.** The same code runs on a laptop GPU or a datacenter card; each GPU gets its own profile.
@@ -35,7 +35,7 @@ ManwhaHDFyer/
 │   ├── benchmark.py           ← Benchmark map, batch-size lookup, max chunk height
 │   └── cache.py               ← Per-GPU JSON cache in cache/
 ├── inference/
-│   ├── chunker.py             ← Page → overlapping strips (ChunkMeta)
+│   ├── chunker.py             ← Page → fixed-shape overlapping strips (ChunkMeta)
 │   ├── batcher.py             ← Groups same-shape chunks into VRAM-safe batches
 │   └── engine.py              ← Pre/post-processing + batched forward pass
 ├── pipeline/
@@ -46,6 +46,7 @@ ManwhaHDFyer/
 │   └── cleanup.py             ← Near-black → black
 ├── plotter.py                 ← Fits the VRAM model and draws vram_vs_pixels_detailed.png
 ├── test.py                    ← Chunk/reassemble round-trip test (no inference)
+├── experiments/               ← Numbered experiment scripts behind the strip planner
 ├── legacy/                    ← Phase 1 code, kept for reference (does not run)
 ├── models/                    ← Weight files (gitignored, download manually)
 ├── cache/                     ← GPU profiles (gitignored, generated)
@@ -97,7 +98,7 @@ VRAM_MB ≈ 0.0085 × (W × H) + 32.1        R² = 1.0000
 | `profiler/runner.estimate_shape_vram` | The formula itself. |
 | Profiler pre-flight | Shapes estimated above **75%** of VRAM are marked invalid without being run, which avoids the WSL thrash. This is why `709×1024` shows as "OOM" in the 4060 cache. |
 | `inference/chunker.chunk_page` | A page under 75% of VRAM is upscaled in one pass. |
-| `profiler/benchmark.get_max_chunk_height` | Solves the formula for height: `H = (0.75·VRAM − 32.1) / (0.0085·W)`. On the 4060 that's 898 rows for an 800 px wide page, or 998 for 720 px. |
+| `profiler/benchmark.get_max_chunk_height` | Solves the formula for height: `H = (0.75·VRAM − 32.1) / (0.0085·W)`. On the 4060 that's 898 rows for an 800 px wide page, or 998 for 720 px. This is the ceiling for strip height (and the strip height itself with `LEGACY_STRIPS`). |
 | `profiler/benchmark.build_map` | Safe batch size = `floor(0.85·VRAM / peak)`, from measured peaks. |
 
 The 75% budget leaves room for the 4× output tensor and allocator fragmentation; the 85% line caps batch size. Both are drawn on the plot.
@@ -118,13 +119,26 @@ Measured on an RTX 4060 Laptop (8 GB), 800 px wide pages:
 
 | | |
 |---|---|
-| One 800×898 strip (warm) | ~3.7 s |
-| One 800×4700 page | ~20 s |
-| 35-page chapter | ~12–13 min |
+| One 800×4700 page (GPU) | ~17 s |
+| 34-page chapter (wall) | ~10 min |
 
-The GPU is compute-bound: per-pixel cost is roughly flat (2.9–4.3 µs/px) across tile sizes, and at max strip height only one strip fits per batch, so batching doesn't help on 8 GB cards. It's built for large GPUs; an H200 profile allows batches of up to 225.
+The GPU is compute-bound: per-pixel cost is roughly flat (2.9–4.3 µs/px) across tile sizes, and only one strip fits per batch, so batching doesn't help on 8 GB cards. It's built for large GPUs; an H200 profile allows batches of up to 225.
 
-The first time each new strip shape appears, cuDNN autotuning adds about 7 s.
+### Smarter strips
+
+The strip planner (`inference/chunker.py`) replaced the original one, which cut the tallest strip that fit VRAM (898 rows at 800 px), overlapped strips by 128 rows and left a short last strip. Two things were wasted: the 128-row overlaps are upscaled twice, and the last strip's height changed with every page, so cuDNN re-tuned for a new shape each time (about 7 s the first time a shape appears).
+
+Now every strip of a page has the same height, starts are spread evenly down the page, and neighbours overlap by about 32 rows. Compared with the old planner: ~80% GPU time, ~87% wall time on a chapter, output differences under 1 grey level on average.
+
+| Measurement | Result |
+|---|---|
+| GPU time, 15 unseen pages (experiment 13) | 80% of the old planner |
+| Wall time, one 34-page chapter, full pipeline | 87% (589 s vs 680 s) |
+| GPU time, same chapter, raw 2× (validation) | 85% (559 s vs 658 s), min SSIM 0.9990 |
+| Similarity to the old output, raw 2× (SSIM, grayscale) | 0.9990–0.9995 per page |
+| Mean absolute difference, raw 2× | 0.07 grey levels (of 255) |
+
+Set `LEGACY_STRIPS = True` at the top of `main.py` to get the old planner back. The experiments behind this are in [experiments/](experiments/).
 
 ---
 
@@ -191,7 +205,7 @@ Paths and settings are currently hard-coded in `main.py`; there is no CLI yet.
 python test.py [path/to/chapter.cbz]
 ```
 
-This chunks every page, uses a nearest-neighbour resize as a stand-in for the model, reassembles, and checks the output is pixel-exact. It's fast because no inference runs.
+This chunks every page, uses a nearest-neighbour resize as a stand-in for the model, reassembles, and checks the output is pixel-exact, for both the default and the legacy strip planner. It then sweeps synthetic pages of widths 690, 800 and 1080 at every height from 130 to 9000 in steps of 7. No inference runs; it takes about 3 minutes.
 
 ---
 
@@ -199,7 +213,7 @@ This chunks every page, uses a nearest-neighbour resize as a stand-in for the mo
 
 **The model:** 4x-UltraSharp is an RRDBNet (Residual-in-Residual Dense Block Network, 23 blocks) trained with GAN methods. At inference time only the generator runs, a deep CNN that maps low-res pixels to 4× high-res output. The final 2× output comes from a Lanczos downscale of the 4× result, which also suppresses model artifacts.
 
-**Chunking:** manhwa pages are typically 720–800 px wide and 4000–5000 px tall, far too big for one forward pass on consumer GPUs. The chunker cuts each page into the tallest strips that fit the VRAM budget, with 128 px overlaps. After upscaling, each overlap is linearly blended (top strip fading out, bottom strip fading in), so seams disappear.
+**Chunking:** manhwa pages are typically 720–800 px wide and 4000–5000 px tall, far too big for one forward pass on consumer GPUs. A page that fits the VRAM budget is upscaled in one pass. Otherwise the chunker cuts it into strips of one fixed height, `512 × 800 / width` rows (512 for an 800 px page, so every width gets the same pixels per strip), capped at the VRAM limit. It uses the fewest strips that give at least 32 rows of overlap and spreads their starts evenly, so the overlaps come out at roughly 32 rows each. A page just under two strips tall gets two slightly taller strips instead, to keep the 32-row overlap. After upscaling, each overlap is linearly blended (top strip fading out, bottom strip fading in), so seams disappear.
 
 **Post-processing:** a gentle unsharp mask (strength 0.3, radius 1.0) recovers line detail the model softens. Pixels whose channels are all below 15 become pure black, which removes patchiness in solid dark regions.
 
@@ -223,12 +237,12 @@ This chunks every page, uses a nearest-neighbour resize as a stand-in for the mo
 - [x] GPU profiler + VRAM model + per-GPU cache
 - [x] VRAM-aware chunking and batched inference
 - [x] Crash-safe resume
+- [x] Fixed-shape strips with 32-row overlap (one cuDNN tune per page width)
 
 ### Next
 - [ ] CLI wired to `core/config.py` (paths, model, limit, format/quality)
 - [ ] Restore credit-page skip and file logging from Phase 1
 - [x] `requirements.txt`
-- [ ] Pad tail strips to a fixed height (one cuDNN tune per width; lets tails batch)
 - [ ] Overlap CPU work (decode, sharpen, encode) with GPU inference
 - [ ] Full library run on H200
 - [ ] Edge-aware sharpening (sharpen lines, preserve flat areas)

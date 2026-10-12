@@ -23,6 +23,9 @@ from postprocessing.cleanup import cleanup_near_black
 
 cudnn.benchmark = True
 
+# True restores the old strips: tallest strip that fits VRAM, 128-row overlap, short last strip.
+LEGACY_STRIPS = False
+
 
 def run_profiler_pipeline():
     if cache_check():
@@ -51,7 +54,7 @@ def run_profiler_pipeline():
         print(f"  {w}x{h} -> {result}")
 
 
-def process_chapter_v2(cbz_path: Path, model: torch.nn.Module, benchmark_map: dict, output_path: Path, scale: int = 4):
+def process_chapter_v2(cbz_path: Path, model: torch.nn.Module, benchmark_map: dict, output_path: Path, scale: int = 4, legacy_strips: bool = LEGACY_STRIPS):
     print(f"Loading pages from {cbz_path}...")
     pages = []
     page_names = {}
@@ -63,7 +66,7 @@ def process_chapter_v2(cbz_path: Path, model: torch.nn.Module, benchmark_map: di
     print("Chunking pages...")
     all_chunks = []
     for page_id, image in enumerate(pages):
-        all_chunks.extend(chunk_page(image, page_id, benchmark_map))
+        all_chunks.extend(chunk_page(image, page_id, benchmark_map, legacy_strips=legacy_strips))
     print(f"Total chunks: {len(all_chunks)}")
 
     batches = build_batches(all_chunks, benchmark_map)
@@ -110,7 +113,7 @@ def process_all(manwha_dir: Path, output_dir: Path, model_path: Path, scale: int
         # Write to .part and rename on success, so an interrupted chapter isn't mistaken for a finished one on resume.
         chapter_start = time.perf_counter()
         part_path = output_path.with_name(output_path.name + ".part")
-        process_chapter_v2(cbz_path, model, benchmark_map, part_path, scale)
+        process_chapter_v2(cbz_path, model, benchmark_map, part_path, scale, LEGACY_STRIPS)
         part_path.replace(output_path)
         torch.cuda.empty_cache()
         completed += 1
