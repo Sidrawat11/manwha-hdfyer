@@ -37,7 +37,8 @@ ManwhaHDFyer/
 ├── inference/
 │   ├── chunker.py             ← Page → fixed-shape overlapping strips (ChunkMeta)
 │   ├── batcher.py             ← Groups same-shape chunks into VRAM-safe batches
-│   └── engine.py              ← Pre/post-processing + batched forward pass
+│   ├── engine.py              ← Pre/post-processing, backend selection, batched forward pass
+│   └── trt_backend.py         ← TensorRT FP16 engines: build, cache, run (optional)
 ├── pipeline/
 │   ├── page_buffer.py         ← Collects a page's chunks as they return from the GPU
 │   └── reassembler.py         ← Stitches chunks with overlap blending
@@ -197,7 +198,13 @@ python main.py
 
 On the first run with a new GPU it profiles first. That takes a few minutes and is cached in `cache/<gpu>.json`; delete the file to re-profile. Output goes to `results/`, mirroring the input tree. Interrupted runs resume where they stopped.
 
-Paths and settings are currently hard-coded in `main.py`; there is no CLI yet.
+Paths and settings are currently hard-coded in `main.py`. The one flag is the inference runtime:
+
+```bash
+python main.py --backend auto      # auto (default) | trt | compiled | eager
+```
+
+`auto` uses TensorRT if it is installed (`pip install tensorrt-cu12 onnx`, optional, see `requirements.txt`), else `torch.compile`, else plain PyTorch. TensorRT engines are built once per strip shape (about 80 s each) and cached in `cache/trt_engines/`; shapes without an engine, and any engine that fails, run on plain PyTorch.
 
 **Test:**
 

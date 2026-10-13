@@ -1,6 +1,7 @@
 import os
 # Must be set before torch is imported: lets the allocator grow segments instead of fragmenting.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+import argparse
 import cv2
 import time
 import torch
@@ -17,7 +18,7 @@ from profiler.runner import run_profiler
 from profiler.benchmark import build_map, get_lookup
 from inference.chunker import chunk_page
 from inference.batcher import build_batches
-from inference.engine import batch_upscale
+from inference.engine import BACKEND, BACKENDS, batch_upscale, engine_stats, prepare_chapter, select_backend
 from postprocessing.sharpen import sharpen
 from postprocessing.cleanup import cleanup_near_black
 
@@ -72,6 +73,9 @@ def process_chapter_v2(cbz_path: Path, model: torch.nn.Module, benchmark_map: di
     batches = build_batches(all_chunks, benchmark_map)
     print(f"Total batches: {len(batches)}")
 
+    # Builds any missing TensorRT engine now, so the one-time cost isn't hidden inside the progress bar.
+    prepare_chapter(all_chunks, scale)
+
     page_buffer = PageBuffer(scale)
     with Packager(output_path, 'jpg', 92) as packager:
         for batch in tqdm(batches, desc="Upscaling batches"):
@@ -85,15 +89,19 @@ def process_chapter_v2(cbz_path: Path, model: torch.nn.Module, benchmark_map: di
                     completed_page = cv2.resize(completed_page, (w // 2, h // 2), interpolation=cv2.INTER_LANCZOS4)
                     packager.add_image(page_names[meta.page_id], completed_page)
 
+    stats = engine_stats()
+    if stats["switches"]:
+        print(f"TensorRT: {stats['switches']} engine switches, {sum(stats['load_seconds']):.1f}s loading engines.")
     print(f"Output written to {output_path}")
 
 
-def process_all(manwha_dir: Path, output_dir: Path, model_path: Path, scale: int = 4):
+def process_all(manwha_dir: Path, output_dir: Path, model_path: Path, scale: int = 4, backend: str = BACKEND):
     print("Loading model...")
     model = load_rrdbnet(model_path)
 
     print("Loading benchmark map...")
     benchmark_map = load_cache()
+    select_backend(backend, model, model_path, benchmark_map)
 
     cbz_files = sorted(manwha_dir.rglob("*.cbz"))
     print(f"Found {len(cbz_files)} chapters.")
@@ -126,5 +134,10 @@ def process_all(manwha_dir: Path, output_dir: Path, model_path: Path, scale: int
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Upscale every chapter in Manwhas/ into results/.")
+    parser.add_argument("--backend", choices=BACKENDS, default=BACKEND,
+                        help="inference runtime: auto picks TensorRT if installed, else torch.compile, else eager (default: %(default)s)")
+    args = parser.parse_args()
+
     run_profiler_pipeline()
-    process_all(Path("Manwhas"), Path("results"), Path("models/4x-UltraSharp.pth"))
+    process_all(Path("Manwhas"), Path("results"), Path("models/4x-UltraSharp.pth"), backend=args.backend)
