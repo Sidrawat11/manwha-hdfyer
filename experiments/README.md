@@ -19,6 +19,7 @@ Run everything from the repo root, e.g. `python experiments/exp02_tile_census.py
 | 11 | exp11_hybrid_router.py | CPU | Does a per-page full-vs-route switch beat always routing? |
 | 12 | exp12_strip_sweep.py | GPU | Are the full pipeline strips too tall, overlaps too big? (15 fresh pages, saves the art) |
 | 13 | exp13_strips_vs_routing.py | GPU | Smarter strips vs edge routing head to head (15 new pages) + seam check |
+| 14 | exp14_tensorrt.py | GPU | Same model, three runtimes: eager vs torch.compile vs TensorRT FP16 (10 new pages, 4 widths, slider comparers). Needs `pip install onnx tensorrt-cu12` |
 
 `common.py` holds the shared sampling, line detector and tile classifier.
 Outputs go to `out/` (gitignored).
