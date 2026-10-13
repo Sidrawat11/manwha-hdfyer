@@ -30,11 +30,20 @@ class Packager:
         self.close()
         return False
 
+    def encode(self, img: np.ndarray) -> bytes:
+        """Encode an image array in the archive's format. Touches no shared state, so it is safe to call from worker threads."""
+        success, buffer = cv2.imencode(self.format, img, [self.fmt, self.quality])
+        if not success:
+            raise RuntimeError(f"Could not encode image as {self.format}")
+        return buffer.tobytes()
+
+    def add_encoded(self, filename, encoded: bytes):
+        """Add already-encoded image bytes (from encode) to the archive, renaming the extension to match the encoded format."""
+        self.zip_file.writestr(str(PurePosixPath(filename).with_suffix(self.format)), encoded)
+
     def add_image(self, filename, img: np.ndarray):
         """Encode and add an image array to the archive, renaming the extension to match the encoded format."""
-        success, buffer = cv2.imencode(self.format, img, [self.fmt, self.quality])
-        if success:
-            self.zip_file.writestr(str(PurePosixPath(filename).with_suffix(self.format)), buffer.tobytes())
+        self.add_encoded(filename, self.encode(img))
 
     def add_raw(self, filename, raw_bytes):
         """Write raw bytes directly into the archive without re-encoding."""

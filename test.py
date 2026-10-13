@@ -8,12 +8,17 @@ Every case runs in both strip modes (smarter strips and legacy). A synthetic swe
 then covers widths 690, 800 and 1080 at every page height from 130 to 9000 in steps of 7.
 
 Last come the inference-backend checks (engine cache key, backend selection, shape routing).
-They touch no GPU either.
+They touch no GPU either. Finally the page-finishing checks run fake 4x pages through the
+overlapped and the serial path and compare the two CBZs.
 
 Usage: python test.py [path/to/chapter.cbz]   (defaults to the first CBZ in Manwhas/)
 """
 
 import sys
+import tempfile
+import threading
+import time
+import zipfile
 import cv2
 import numpy as np
 from pathlib import Path
@@ -22,6 +27,9 @@ from profiler.cache import load_cache
 from inference import engine, trt_backend
 from inference.chunker import chunk_page, get_strip_height
 from pipeline.reassembler import reassemble
+from pipeline import finisher as finisher_module
+from pipeline.finisher import PageFinisher
+from core.packager import Packager
 
 SCALE = 4
 MODES = [(False, "smarter"), (True, "legacy")]
@@ -196,6 +204,110 @@ for description, ok in checks:
 backend_failures = sum(not ok for _, ok in checks)
 print(f"  {'OK  ' if not backend_failures else 'FAIL'} {len(checks) - backend_failures}/{len(checks)} backend checks")
 
+
+
+def write_cbz(path: Path, pages: list[tuple[str, np.ndarray]], overlap: bool, workers: int = 4, max_inflight: int = 3) -> int:
+    """Runs fake 4x pages through the finishing path into a CBZ. Returns the most pages that were in flight at once."""
+    most_inflight = 0
+    with Packager(path, 'jpg', 92) as packager, PageFinisher(packager, workers, max_inflight, overlap) as page_finisher:
+        for name, page in pages:
+            page_finisher.submit(name, page)
+            most_inflight = max(most_inflight, len(page_finisher._pending))
+    return most_inflight
+
+
+def cbz_entries(path: Path) -> list[tuple[str, bytes]]:
+    with zipfile.ZipFile(path) as z:
+        return [(name, z.read(name)) for name in z.namelist()]
+
+
+def finisher_checks() -> list[tuple[str, bool]]:
+    """(description, passed) for each page-finishing check. No GPU: the pages are random arrays."""
+    checks = []
+    rng = np.random.default_rng(2)
+    # Big pages first, so with several workers the later pages finish before the earlier ones.
+    heights = [2400, 1800, 96, 64, 1200, 32, 900, 48, 600, 16, 300, 8]
+    pages = [(f"{i:03d}__page.png", rng.integers(0, 256, (h, 640, 3), dtype=np.uint8)) for i, h in enumerate(heights)]
+    pages[3][1][:] = 5   # a near-black page, for the cleanup step
+    expected_names = [str(Path(name).with_suffix(".jpg")) for name, _ in pages]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        write_cbz(tmp / "serial.cbz", pages, overlap=False)
+        serial = cbz_entries(tmp / "serial.cbz")
+        checks.append(("serial: every page written, in order", [name for name, _ in serial] == expected_names))
+        decoded = cv2.imdecode(np.frombuffer(serial[0][1], np.uint8), cv2.IMREAD_COLOR)
+        checks.append(("serial: pages are halved JPEGs", decoded is not None and decoded.shape == (1200, 320, 3)))
+        black = cv2.imdecode(np.frombuffer(serial[3][1], np.uint8), cv2.IMREAD_COLOR)
+        checks.append(("serial: near-black page is cleaned to black", black is not None and int(black.max()) == 0))
+
+        for workers, max_inflight in [(4, 3), (1, 1), (8, 2), (2, 6)]:
+            label = f"overlap, {workers} workers, {max_inflight} in flight"
+            most = write_cbz(tmp / "overlap.cbz", pages, overlap=True, workers=workers, max_inflight=max_inflight)
+            overlapped = cbz_entries(tmp / "overlap.cbz")
+            checks.append((f"{label}: same page order as serial", [n for n, _ in overlapped] == [n for n, _ in serial]))
+            checks.append((f"{label}: every page byte-identical to serial", overlapped == serial))
+            checks.append((f"{label}: never more than {max_inflight} pages in flight", 1 <= most <= max_inflight))
+
+        # Pages really are finished off the calling thread, and several at once.
+        real_finish = finisher_module.finish_page
+        threads, running, most_running, lock = set(), 0, 0, threading.Lock()
+
+        def tracked_finish(page, packager):
+            nonlocal running, most_running
+            with lock:
+                threads.add(threading.current_thread().name)
+                running += 1
+                most_running = max(most_running, running)
+            time.sleep(0.05)
+            try:
+                return real_finish(page, packager)
+            finally:
+                with lock:
+                    running -= 1
+
+        def failing_finish(page, packager):
+            if page.shape[0] == 96:
+                raise RuntimeError("simulated finishing failure")
+            return real_finish(page, packager)
+
+        try:
+            finisher_module.finish_page = tracked_finish
+            write_cbz(tmp / "tracked.cbz", pages, overlap=True, workers=4, max_inflight=3)
+            checks.append(("overlap: pages are finished on worker threads",
+                           threads and threading.current_thread().name not in threads))
+            checks.append(("overlap: several pages are finished at once, within the limit", 2 <= most_running <= 3))
+            threads.clear()
+            write_cbz(tmp / "tracked.cbz", pages, overlap=False)
+            checks.append(("serial: pages are finished on the calling thread", threads == {threading.current_thread().name}))
+
+            # A failing page must fail the whole run, in both paths, and nothing after it may be written.
+            finisher_module.finish_page = failing_finish
+            for overlap in (True, False):
+                label = "overlap" if overlap else "serial"
+                try:
+                    write_cbz(tmp / "failed.cbz", pages, overlap=overlap)
+                    raised = False
+                except RuntimeError as e:
+                    raised = "simulated finishing failure" in str(e)
+                checks.append((f"{label}: a worker exception fails the run", raised))
+                written = [name for name, _ in cbz_entries(tmp / "failed.cbz")]
+                checks.append((f"{label}: pages after the failed one are not written", written == expected_names[:2]))
+        finally:
+            finisher_module.finish_page = real_finish
+
+    return checks
+
+
+print("Page-finishing checks (no GPU)")
+finish_checks = finisher_checks()
+for description, ok in finish_checks:
+    if not ok:
+        print(f"  FAIL {description}")
+finisher_failures = sum(not ok for _, ok in finish_checks)
+print(f"  {'OK  ' if not finisher_failures else 'FAIL'} {len(finish_checks) - finisher_failures}/{len(finish_checks)} page-finishing checks")
+
 print(f"\n{total - failures}/{total} passed")
 print(f"{len(checks) - backend_failures}/{len(checks)} backend checks passed")
-sys.exit(1 if failures or backend_failures else 0)
+print(f"{len(finish_checks) - finisher_failures}/{len(finish_checks)} page-finishing checks passed")
+sys.exit(1 if failures or backend_failures or finisher_failures else 0)

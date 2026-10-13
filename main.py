@@ -2,7 +2,6 @@ import os
 # Must be set before torch is imported: lets the allocator grow segments instead of fragmenting.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import argparse
-import cv2
 import time
 import torch
 from tqdm import tqdm
@@ -12,6 +11,7 @@ from core import extractor
 from core.model_loader import load_rrdbnet
 from core.packager import Packager
 from pipeline.page_buffer import PageBuffer
+from pipeline.finisher import PageFinisher
 from profiler.cache import cache_check, save_cache, load_cache
 from profiler.scanner import scan_library
 from profiler.runner import run_profiler
@@ -19,13 +19,15 @@ from profiler.benchmark import build_map, get_lookup
 from inference.chunker import chunk_page
 from inference.batcher import build_batches
 from inference.engine import BACKEND, BACKENDS, batch_upscale, engine_stats, prepare_chapter, select_backend
-from postprocessing.sharpen import sharpen
-from postprocessing.cleanup import cleanup_near_black
 
 cudnn.benchmark = True
 
 # True restores the old strips: tallest strip that fits VRAM, 128-row overlap, short last strip.
 LEGACY_STRIPS = False
+
+# CPU finishing (sharpen, cleanup, downscale, encode) runs on threads while the GPU works on the next pages.
+CPU_WORKERS = min(4, os.cpu_count() or 1)
+MAX_INFLIGHT = 3   # stitched 4x pages queued or being finished at once; each is ~180 MB
 
 
 def run_profiler_pipeline():
@@ -55,7 +57,8 @@ def run_profiler_pipeline():
         print(f"  {w}x{h} -> {result}")
 
 
-def process_chapter_v2(cbz_path: Path, model: torch.nn.Module, benchmark_map: dict, output_path: Path, scale: int = 4, legacy_strips: bool = LEGACY_STRIPS):
+def process_chapter_v2(cbz_path: Path, model: torch.nn.Module, benchmark_map: dict, output_path: Path, scale: int = 4, legacy_strips: bool = LEGACY_STRIPS,
+                       cpu_workers: int = CPU_WORKERS, max_inflight: int = MAX_INFLIGHT, overlap: bool = True):
     print(f"Loading pages from {cbz_path}...")
     pages = []
     page_names = {}
@@ -77,17 +80,15 @@ def process_chapter_v2(cbz_path: Path, model: torch.nn.Module, benchmark_map: di
     prepare_chapter(all_chunks, scale)
 
     page_buffer = PageBuffer(scale)
-    with Packager(output_path, 'jpg', 92) as packager:
+    # A worker's exception surfaces in submit() or when the finisher closes, and fails the chapter.
+    with Packager(output_path, 'jpg', 92) as packager, PageFinisher(packager, cpu_workers, max_inflight, overlap) as finisher:
         for batch in tqdm(batches, desc="Upscaling batches"):
             results = batch_upscale(batch, model, scale)
             for upscaled_array, meta in results:
                 completed_page = page_buffer.add(upscaled_array, meta)
                 if completed_page is not None:
-                    completed_page = sharpen(completed_page)
-                    completed_page = cleanup_near_black(completed_page)
-                    h, w = completed_page.shape[:2]
-                    completed_page = cv2.resize(completed_page, (w // 2, h // 2), interpolation=cv2.INTER_LANCZOS4)
-                    packager.add_image(page_names[meta.page_id], completed_page)
+                    finisher.submit(page_names[meta.page_id], completed_page)
+                    del completed_page
 
     stats = engine_stats()
     if stats["switches"]:
@@ -95,7 +96,8 @@ def process_chapter_v2(cbz_path: Path, model: torch.nn.Module, benchmark_map: di
     print(f"Output written to {output_path}")
 
 
-def process_all(manwha_dir: Path, output_dir: Path, model_path: Path, scale: int = 4, backend: str = BACKEND):
+def process_all(manwha_dir: Path, output_dir: Path, model_path: Path, scale: int = 4, backend: str = BACKEND,
+                cpu_workers: int = CPU_WORKERS, max_inflight: int = MAX_INFLIGHT, overlap: bool = True):
     print("Loading model...")
     model = load_rrdbnet(model_path)
 
@@ -121,7 +123,7 @@ def process_all(manwha_dir: Path, output_dir: Path, model_path: Path, scale: int
         # Write to .part and rename on success, so an interrupted chapter isn't mistaken for a finished one on resume.
         chapter_start = time.perf_counter()
         part_path = output_path.with_name(output_path.name + ".part")
-        process_chapter_v2(cbz_path, model, benchmark_map, part_path, scale, LEGACY_STRIPS)
+        process_chapter_v2(cbz_path, model, benchmark_map, part_path, scale, LEGACY_STRIPS, cpu_workers, max_inflight, overlap)
         part_path.replace(output_path)
         torch.cuda.empty_cache()
         completed += 1
@@ -137,7 +139,16 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Upscale every chapter in Manwhas/ into results/.")
     parser.add_argument("--backend", choices=BACKENDS, default=BACKEND,
                         help="inference runtime: auto picks TensorRT if installed, else torch.compile, else eager (default: %(default)s)")
+    parser.add_argument("--cpu-workers", type=int, default=CPU_WORKERS,
+                        help="threads finishing pages (sharpen, downscale, encode) while the GPU works (default: %(default)s)")
+    parser.add_argument("--max-inflight", type=int, default=MAX_INFLIGHT,
+                        help="most 4x pages queued or being finished at once, ~180 MB each (default: %(default)s)")
+    parser.add_argument("--no-overlap", action="store_true",
+                        help="finish each page on the main thread before the GPU continues (the old serial path)")
     args = parser.parse_args()
+    if args.cpu_workers < 1 or args.max_inflight < 1:
+        parser.error("--cpu-workers and --max-inflight must be at least 1")
 
     run_profiler_pipeline()
-    process_all(Path("Manwhas"), Path("results"), Path("models/4x-UltraSharp.pth"), backend=args.backend)
+    process_all(Path("Manwhas"), Path("results"), Path("models/4x-UltraSharp.pth"), backend=args.backend,
+                cpu_workers=args.cpu_workers, max_inflight=args.max_inflight, overlap=not args.no_overlap)
