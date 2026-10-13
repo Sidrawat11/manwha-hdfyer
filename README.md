@@ -206,6 +206,12 @@ python main.py --backend auto      # auto (default) | trt | compiled | eager
 
 `auto` uses TensorRT if it is installed (`pip install tensorrt-cu12 onnx`, optional, see `requirements.txt`), else `torch.compile`, else plain PyTorch. TensorRT engines are built once per strip shape (about 80 s each) and cached in `cache/trt_engines/`; shapes without an engine, and any engine that fails, run on plain PyTorch.
 
+Finished pages are sharpened, downscaled and JPEG-encoded on background threads while the GPU works on the next pages, instead of the GPU waiting for each one. Three flags control it:
+
+- `--cpu-workers N`: threads doing that work (default `min(4, cpu count)`).
+- `--max-inflight N`: most 4× pages queued or in progress at once (default 3); caps memory at about 180 MB per in-flight page.
+- `--no-overlap`: the old serial path, for debugging and comparison.
+
 **Test:**
 
 ```bash
