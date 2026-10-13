@@ -281,6 +281,22 @@ def finisher_checks() -> list[tuple[str, bool]]:
             write_cbz(tmp / "tracked.cbz", pages, overlap=False)
             checks.append(("serial: pages are finished on the calling thread", threads == {threading.current_thread().name}))
 
+            # Same pages packaged twice, more than a zip timestamp tick (2 s) apart: the files must be byte-identical.
+            finisher_module.finish_page = real_finish
+            write_cbz(tmp / "first.cbz", pages, overlap=True)
+            time.sleep(2.1)
+            write_cbz(tmp / "second.cbz", pages, overlap=True)
+            checks.append(("packaging the same pages twice gives byte-identical CBZ files",
+                           (tmp / "first.cbz").read_bytes() == (tmp / "second.cbz").read_bytes()))
+            checks.append(("serial and overlapped CBZ files are byte-identical",
+                           (tmp / "serial.cbz").read_bytes() == (tmp / "second.cbz").read_bytes()))
+            with zipfile.ZipFile(tmp / "first.cbz") as z:
+                checks.append(("every zip entry has the fixed 1980-01-01 timestamp",
+                               all(info.date_time == (1980, 1, 1, 0, 0, 0) for info in z.infolist())))
+                checks.append(("zip entries keep their compression and permissions",
+                               all(info.compress_type == zipfile.ZIP_STORED and info.external_attr == 0o600 << 16
+                                   for info in z.infolist())))
+
             # A failing page must fail the whole run, in both paths, and nothing after it may be written.
             finisher_module.finish_page = failing_finish
             for overlap in (True, False):
