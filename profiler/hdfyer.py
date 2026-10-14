@@ -113,10 +113,14 @@ class BatchProfile:
     Call it with a strip's (height, width); odd widths count as the even width the engine pads them to.
     """
 
-    def __init__(self, model: torch.nn.Module, weights_id: str, strip_height: int, before_measuring: Callable[[], None] | None = None):
+    def __init__(self, model: torch.nn.Module, weights_id: str, strip_height: int, before_measuring: Callable[[], None] | None = None,
+                 on_missing: Callable[[int], int] | None = None):
+        """on_missing(width) -> batch, if given, answers for a width with no profile instead of measuring it
+        (--parallel workers: the warm-up measured every width, and workers must not write the cache)."""
         self._model = model
         self._strip_height = strip_height
         self._before_measuring = before_measuring
+        self._on_missing = on_missing
         section = cache.load_section(SECTION)
         # A profile for other weights or another strip height says nothing about this model.
         if section.get("weights") != weights_id or section.get("strip_height") != strip_height:
@@ -128,6 +132,8 @@ class BatchProfile:
         width += width % 2
         entry = self._section["widths"].get(str(width))
         if entry is None:
+            if self._on_missing is not None:
+                return self._on_missing(width)
             entry = self._measure(width)
         return entry["best_batch"]
 

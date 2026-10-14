@@ -133,6 +133,7 @@ Output goes to `results/`, mirroring the input folders. Chapters already done ar
 | `--cpu-workers N` | `min(4, CPU count)` | Background threads for sharpening and JPEG encoding. |
 | `--max-inflight N` | `3` | Most finished pages waiting for those threads at once (about 45 MB each). |
 | `--no-overlap` | off | Do the sharpening and encoding on the main thread, for debugging and comparison. |
+| `--parallel N` | `1` | Chapters processed at once, each in its own worker process with its own copy of the model. For large GPUs (16 GB+), where one Python process can't keep the GPU busy; on a laptop it gains little. A warm-up builds every engine and batch profile first, so the workers never write the caches. |
 
 Run the tests (no model needed, a few minutes):
 

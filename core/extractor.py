@@ -5,8 +5,10 @@ Handles reading CBZ archive files and extracting their contents as
 decoded image arrays for downstream processing.
 """
 
+import io
 import zipfile
 import cv2
+import imagesize
 import numpy as np
 
 def extract_images(cbz_path):
@@ -18,6 +20,15 @@ def extract_images(cbz_path):
             if image is None:
                 continue
             yield name, image, raw_bytes
+
+def page_sizes(cbz_path):
+    """(width, height) of every page extract_images would yield, read from the image headers without decoding."""
+    sizes = []
+    with zipfile.ZipFile(cbz_path) as z:
+        for name in _get_image_names(z):
+            with z.open(name) as raw:
+                sizes.append(imagesize.get(io.BytesIO(raw.read(65536))))
+    return sizes
 
 def count_images(cbz_path):
     with zipfile.ZipFile(cbz_path) as z:

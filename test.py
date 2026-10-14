@@ -214,6 +214,61 @@ def profile_checks() -> list[tuple[str, bool]]:
     return checks
 
 
+def parallel_checks() -> list[tuple[str, bool]]:
+    """--parallel plumbing that needs no GPU: the warm-up sees the same pages as the workers, resume, state hand-over."""
+    import main
+    from core import extractor
+    checks = []
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        cbz = tmp / "lib" / "series" / "ch1.cbz"
+        cbz.parent.mkdir(parents=True)
+        rng = np.random.default_rng(4)
+        with zipfile.ZipFile(cbz, "w") as z:
+            for name, (h, w) in [("002.jpg", (300, 690)), ("001.png", (40, 1080)), ("003.webp", (90, 800))]:
+                ok, data = cv2.imencode(Path(name).suffix, rng.integers(0, 256, (h, w, 3), dtype=np.uint8))
+                z.writestr(name, data.tobytes())
+            z.writestr("__MACOSX/._001.png", b"junk")
+            z.writestr("ComicInfo.xml", b"<x/>")
+        decoded = [(image.shape[1], image.shape[0]) for _, image, _ in extractor.extract_images(cbz)]
+        checks.append(("parallel: the warm-up's header scan sees exactly the pages the workers decode",
+                       extractor.page_sizes(cbz) == decoded == [(1080, 40), (690, 300), (800, 90)]))
+
+        (tmp / "lib" / "series" / "ch2.cbz").write_bytes(cbz.read_bytes())
+        (tmp / "lib" / "series" / "ch3.cbz").write_bytes(cbz.read_bytes())
+        out = tmp / "out" / "series"
+        out.mkdir(parents=True)
+        (out / "ch1.cbz").write_bytes(b"finished")
+        (out / "ch2.cbz.part").write_bytes(b"interrupted")
+        todo = [str(relative) for _, relative in main.todo_chapters(tmp / "lib", tmp / "out")]
+        checks.append(("parallel: finished chapters are skipped and an interrupted .part is redone",
+                       todo == ["series/ch2.cbz", "series/ch3.cbz"]))
+
+    saved_runtime = engine._runtime
+    try:
+        engine._runtime = engine._Runtime()
+        engine._runtime.failed_shapes, engine._runtime.batch_override = {(512, 1500)}, {(512, 800): 2}
+        state = engine.warm_up_state()
+        engine._runtime = engine._Runtime()
+        engine.adopt_warm_up(state["failed_shapes"], state["batch_override"])
+        checks.append(("parallel: workers start from the warm-up's failed shapes and lowered batches",
+                       engine._runtime.failed_shapes == {(512, 1500)} and engine._runtime.batch_override == {(512, 800): 2}))
+    finally:
+        engine._runtime = saved_runtime
+
+    saved = (hdfyer_profile.cache.load_section, hdfyer_profile.profile_width)
+    measured = []
+    hdfyer_profile.cache.load_section = lambda key: {"weights": "w", "strip_height": 512, "widths": {"800": {"best_batch": 2}}}
+    hdfyer_profile.profile_width = lambda *args, **kwargs: measured.append(args) or {"best_batch": 9}
+    try:
+        profile = hdfyer_profile.BatchProfile(None, "w", 512, on_missing=lambda width: 1)
+        checks.append(("parallel: a worker never measures a missing width; it answers through on_missing",
+                       profile(512, 800) == 2 and profile(512, 1500) == 1 and measured == []))
+    finally:
+        hdfyer_profile.cache.load_section, hdfyer_profile.profile_width = saved
+    return checks
+
+
 def recovery_checks() -> list[tuple[str, bool]]:
     """Out-of-memory and engine failures must be logged, retried smaller, and still produce the page. Runs on the CPU."""
     checks = []
@@ -489,6 +544,7 @@ def backend_checks(benchmark_map: dict) -> list[tuple[str, bool]]:
         engine._runtime = saved_runtime
 
     checks += profile_checks()
+    checks += parallel_checks()
     checks += recovery_checks()
 
     # SPAN's convolutions must be folded once at load, not on every forward pass.

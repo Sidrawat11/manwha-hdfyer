@@ -130,6 +130,17 @@ def _describe(error: Exception) -> str:
     return f"{type(error).__name__}: {text.splitlines()[0]}" if text else type(error).__name__
 
 
+def adopt_warm_up(failed_shapes, batch_override: dict) -> None:
+    """Starts this process from what a warm-up found: shapes that must run eager and engine batches it had to lower."""
+    _runtime.failed_shapes = {tuple(shape) for shape in failed_shapes}
+    _runtime.batch_override = {tuple(shape): batch for shape, batch in batch_override}
+
+
+def warm_up_state() -> dict:
+    """What adopt_warm_up needs, in a form that pickles."""
+    return {"failed_shapes": sorted(_runtime.failed_shapes), "batch_override": sorted(_runtime.batch_override.items())}
+
+
 def free_gpu() -> None:
     """Frees the live engine and every cached block. After an out-of-memory this must happen before the next allocation."""
     if _runtime.trt is not None:
