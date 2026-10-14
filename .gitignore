@@ -36,3 +36,9 @@ experiments/out/
 # Model weights and downloads
 *.safetensors
 models/janai_dl/
+training*/
+exams/
+
+# Copyrighted pages: never commit, wherever they end up
+*.cbz
+**/compare_page*.html

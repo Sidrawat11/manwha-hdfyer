@@ -1,0 +1,6 @@
+series,style,pages,student_ssim,janai_ssim,student_detail,janai_detail,student_flat,janai_flat,student_blank,janai_blank,detail_better_pages,student_meandiff,janai_meandiff,teacher_s_per_page,student_s_per_page,janai_s_per_page
+A,"Soft pastel, painted (high-res)",30,0.9796,0.9697,0.9567,0.9311,0.9808,0.9723,0.9983,0.9989,30,1.9603,1.903,17.8641,0.7694,0.6711
+B,Clean modern line art,30,0.9795,0.9745,0.9567,0.9455,0.9797,0.9747,0.9988,0.9992,27,1.974,1.8473,8.9344,0.4324,0.3683
+C,Sharp action line art,30,0.978,0.974,0.963,0.9543,0.9819,0.9796,0.9959,0.9973,23,1.7623,1.8323,11.6035,0.5716,0.4911
+D,Gritty texture overlay,30,0.8454,0.8049,0.8411,0.7977,0.8203,0.8034,0.9927,0.9944,30,3.459,4.1203,4.2838,0.1962,0.1768
+E,"Manhua, heavy gradients",30,0.9405,0.9185,0.9255,0.8952,0.9112,0.8993,0.9983,0.9986,30,3.1423,3.901,10.875,0.46,0.4317
