@@ -26,7 +26,7 @@ ManwhaHDFyer/
 ├── main.py                    ← Entry point: profile (once per GPU), then process the library
 ├── core/
 │   ├── extractor.py           ← CBZ → decoded images
-│   ├── model_loader.py        ← Builds RRDBNet, loads weights, FP16 on CUDA
+│   ├── model_loader.py        ← Builds RRDBNet (teacher) or loads the 2x student; FP16 on CUDA
 │   ├── packager.py            ← Images → output CBZ (JPEG/PNG)
 │   └── config.py              ← Settings dataclasses (not yet wired into the v2 pipeline)
 ├── profiler/
@@ -198,7 +198,7 @@ python main.py
 
 On the first run with a new GPU it profiles first. That takes a few minutes and is cached in `cache/<gpu>.json`; delete the file to re-profile. Output goes to `results/`, mirroring the input tree. Interrupted runs resume where they stopped.
 
-Paths and settings are currently hard-coded in `main.py`. The one flag is the inference runtime:
+Paths and settings are currently hard-coded in `main.py`. The flags choose the model, the inference runtime and the CPU finishing:
 
 ```bash
 python main.py --backend auto      # auto (default) | trt | compiled | eager
@@ -211,6 +211,22 @@ Finished pages are sharpened, downscaled and JPEG-encoded on background threads 
 - `--cpu-workers N`: threads doing that work (default `min(4, cpu count)`).
 - `--max-inflight N`: most 4× pages queued or in progress at once (default 3); caps memory at about 180 MB per in-flight page.
 - `--no-overlap`: the old serial path, for debugging and comparison.
+
+Two flags choose the model:
+
+- `--model teacher|student`: `teacher` (default) is 4x-UltraSharp, halved to 2×. `student` is a small native 2× model (SPAN S) distilled from the teacher's look in [experiments/exp16/](experiments/exp16/); it needs `pip install spandrel`.
+- `--student-weights PATH`: weights for `--model student` (default `models/hdfyer/hdfyer-2x-s-r2.pth`, not in the repo).
+
+The student runs in 512-row strips at every width with the same 32-row overlap, skips the VRAM profiler, and its pages are sharpened with radius 0.5 and not halved. Same-shape strips are batched, up to 8 per pass or as many as fit in 75% of VRAM. All three backends work; a TensorRT engine is built per strip shape and batch size.
+
+Measured on one 34-page chapter (800 px wide, RTX 4060 Laptop, TensorRT, engines already built):
+
+| | Wall time | Per page |
+|---|---|---|
+| `--model teacher` | 221 s | 6.5 s |
+| `--model student` | 11 s | 0.32 s |
+
+The student's output is not identical to the teacher's: finished pages score SSIM 0.979–0.989 against the teacher's on three pages of that chapter. Batching did not make the student faster on this GPU (batch 1 and batch 6 both took 11 s).
 
 **Test:**
 
