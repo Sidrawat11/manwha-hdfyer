@@ -61,7 +61,11 @@ def _preprocess(image: np.ndarray) -> torch.Tensor:
     The result is bit-identical to converting on the CPU (float32 / 255, then fp16) for every possible input value.
     """
     host = torch.from_numpy(np.ascontiguousarray(image))
-    rgb = host.to(DEVICE).permute(2, 0, 1).flip(0)          # HWC BGR -> CHW RGB
+    if DEVICE.type == "cuda":
+        # From pinned memory the copy is truly asynchronous. From ordinary memory it would wait for everything already
+        # queued on the stream, i.e. for the previous batch's forward pass, and the one-batch-in-flight overlap is lost.
+        host = host.pin_memory()
+    rgb = host.to(DEVICE, non_blocking=True).permute(2, 0, 1).flip(0)          # HWC BGR -> CHW RGB
     return (rgb.unsqueeze(0).float() / 255.0).half()
 
 
