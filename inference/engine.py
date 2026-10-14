@@ -39,6 +39,8 @@ class _Runtime:
     trt = None           # trt_backend.TrtBackend
     compiled = None      # torch.compile'd channels_last copy of the model
     failed_shapes = set()   # (h, w) chunk shapes that fell back to eager for the rest of the run
+    strip_height = None  # fixed standard strip height (student); None = the benchmark map's (teacher)
+    round_output = False   # round to uint8 instead of truncating (student)
 
 
 _runtime = _Runtime()
@@ -79,10 +81,13 @@ def _unpad(tensor: torch.Tensor, pad_h: int, pad_w: int, scale: int) -> torch.Te
     return output
 
 
-def _postprocess(tensor: torch.Tensor) -> np.ndarray:
-    """Clamps to [0,1], converts GPU tensor back to BGR uint8 HWC numpy array."""
+def _postprocess(tensor: torch.Tensor, round_output: bool = False) -> np.ndarray:
+    """Clamps to [0,1], converts GPU tensor back to BGR uint8 HWC numpy array. Truncates to uint8 unless round_output."""
     output_tensor = tensor.clamp(0, 1).to(torch.float32)
-    output_image_converted = (output_tensor.squeeze(0) * 255).byte().cpu().numpy()
+    scaled = output_tensor.squeeze(0) * 255
+    if round_output:
+        scaled = scaled.round()
+    output_image_converted = scaled.byte().cpu().numpy()
     output_image_transposed = np.transpose(output_image_converted, (1, 2, 0))
     img = cv2.cvtColor(output_image_transposed, cv2.COLOR_RGB2BGR)
     return img
@@ -120,7 +125,7 @@ def _forward_batch(chunks: list[ChunkMeta], model: torch.nn.Module, scale: int, 
     individual = torch.split(upscaled_unpadded, 1, dim=0)
     results = []
     for tensor, meta in zip(individual, chunks):
-        results.append((_postprocess(tensor), meta))
+        results.append((_postprocess(tensor, _runtime.round_output), meta))
 
     return results
 
@@ -144,12 +149,19 @@ def resolve_backend(requested: str, trt_ok: bool | None = None, compile_ok: bool
     return "eager"
 
 
-def select_backend(requested: str, model: torch.nn.Module, model_path: Path, benchmark_map: dict) -> str:
-    """Chooses the runtime for the rest of the run and prints it once. Returns the backend in use."""
+def select_backend(requested: str, model: torch.nn.Module, model_path: Path, benchmark_map: dict | None,
+                   strip_height: int | None = None, round_output: bool = False) -> str:
+    """
+    Chooses the runtime for the rest of the run and prints it once. Returns the backend in use.
+    strip_height: the model's fixed standard strip height, if it doesn't use the benchmark map's.
+    round_output: round the model's output to uint8 instead of truncating it.
+    """
     global _runtime
     _runtime = _Runtime()
     _runtime.failed_shapes = set()
     _runtime.benchmark_map = benchmark_map
+    _runtime.strip_height = strip_height
+    _runtime.round_output = round_output
     backend = resolve_backend(requested)
 
     if backend == "trt":
@@ -171,8 +183,10 @@ def select_backend(requested: str, model: torch.nn.Module, model_path: Path, ben
     return backend
 
 
-def is_standard_shape(height: int, width: int, benchmark_map: dict) -> bool:
+def is_standard_shape(height: int, width: int, benchmark_map: dict | None, strip_height: int | None = None) -> bool:
     """True if a chunk of this size is its width's standard strip, the only shape worth an engine."""
+    if strip_height is not None:
+        return height == strip_height
     return height == get_strip_height(width, benchmark_map)
 
 
@@ -180,7 +194,7 @@ def route(height: int, width: int) -> str:
     """Which runtime a chunk of this size goes to: the selected backend for standard strips, eager for the rest."""
     if _runtime.backend == "eager" or (height, width) in _runtime.failed_shapes:
         return "eager"
-    if not is_standard_shape(height, width, _runtime.benchmark_map):
+    if not is_standard_shape(height, width, _runtime.benchmark_map, _runtime.strip_height):
         return "eager"
     return _runtime.backend
 
@@ -229,7 +243,7 @@ def _forward_trt(chunks: list[ChunkMeta], scale: int) -> list[tuple[np.ndarray, 
     for chunk in chunks:
         chunk_padded, pad_h, pad_w = _pad(_preprocess(chunk.page_slice), scale)
         upscaled = _runtime.trt.run(chunk_padded)
-        results.append((_postprocess(_unpad(upscaled, pad_h, pad_w, scale)), chunk))
+        results.append((_postprocess(_unpad(upscaled, pad_h, pad_w, scale), _runtime.round_output), chunk))
     return results
 
 

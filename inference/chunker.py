@@ -8,6 +8,9 @@ per page width means cuDNN tunes once and strips from any page batch together.
 
 Legacy: the tallest strip the benchmark map allows, a fixed 128-row overlap and
 a short last strip whose height changes with every page.
+
+Fixed height (strip_height=...): the same planner with one strip height for every
+width and no VRAM model. For models the benchmark map was not profiled for.
 """
 
 import math
@@ -80,14 +83,18 @@ def plan_strips(h: int, strip_height: int, overlap: int = SMART_OVERLAP, max_str
     return plan
 
 
-def _smart_chunks(image: np.ndarray, page_id: int, benchmark_map: dict, overlap: int) -> list[ChunkMeta]:
+def _smart_chunks(image: np.ndarray, page_id: int, benchmark_map: dict, overlap: int, strip_height: int | None = None) -> list[ChunkMeta]:
     h, w = image.shape[:2]
 
-    # As in legacy: a page that fits the VRAM budget is upscaled in one pass.
-    if estimate_shape_vram(h, w) < benchmark_map["available_vram"] * 0.75:
-        return [ChunkMeta(page_id, image, 0, 1, 0, h, 0, 0)]
+    if strip_height is not None:
+        # Fixed strip height: the benchmark map (profiled for the teacher) plays no part.
+        plan = plan_strips(h, strip_height, overlap)
+    else:
+        # As in legacy: a page that fits the VRAM budget is upscaled in one pass.
+        if estimate_shape_vram(h, w) < benchmark_map["available_vram"] * 0.75:
+            return [ChunkMeta(page_id, image, 0, 1, 0, h, 0, 0)]
 
-    plan = plan_strips(h, get_strip_height(w, benchmark_map), overlap, get_max_chunk_height(w, benchmark_map))
+        plan = plan_strips(h, get_strip_height(w, benchmark_map), overlap, get_max_chunk_height(w, benchmark_map))
     total_chunks = len(plan)
     results = []
 
@@ -140,8 +147,12 @@ def _legacy_chunks(image: np.ndarray, page_id: int, benchmark_map: dict, overlap
     return results
 
 
-def chunk_page(image: np.ndarray, page_id: int, benchmark_map: dict, overlap: int | None = None, legacy_strips: bool = False) -> list[ChunkMeta]:
-    """Slices a page into strips. `overlap` defaults to 32 rows, or 128 with legacy_strips."""
+def chunk_page(image: np.ndarray, page_id: int, benchmark_map: dict | None, overlap: int | None = None, legacy_strips: bool = False,
+               strip_height: int | None = None) -> list[ChunkMeta]:
+    """
+    Slices a page into strips. `overlap` defaults to 32 rows, or 128 with legacy_strips.
+    With `strip_height` every strip is that tall whatever the width, and benchmark_map is not used.
+    """
     if legacy_strips:
         return _legacy_chunks(image, page_id, benchmark_map, DEFAULT_OVERLAP if overlap is None else overlap)
-    return _smart_chunks(image, page_id, benchmark_map, SMART_OVERLAP if overlap is None else overlap)
+    return _smart_chunks(image, page_id, benchmark_map, SMART_OVERLAP if overlap is None else overlap, strip_height)

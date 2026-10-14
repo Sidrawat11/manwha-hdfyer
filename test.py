@@ -5,7 +5,8 @@ reassembles, and checks the result matches a nearest-neighbour resize of the ful
 page. Also covers a small page that fits without chunking.
 
 Every case runs in both strip modes (smarter strips and legacy). A synthetic sweep
-then covers widths 690, 800 and 1080 at every page height from 130 to 9000 in steps of 7.
+then covers widths 690, 800 and 1080 at every page height from 130 to 9000 in steps of 7,
+and repeats it for the 2x student's strips (fixed 512 rows, scale 2).
 
 Last come the inference-backend checks (engine cache key, backend selection, shape routing).
 They touch no GPU either. Finally the page-finishing checks run fake 4x pages through the
@@ -22,7 +23,9 @@ import zipfile
 import cv2
 import numpy as np
 from pathlib import Path
+import torch
 from core import extractor
+from core.model_loader import fold_reparam
 from profiler.cache import load_cache
 from inference import engine, trt_backend
 from inference.chunker import chunk_page, get_strip_height
@@ -36,29 +39,36 @@ MODES = [(False, "smarter"), (True, "legacy")]
 SWEEP_WIDTHS = [690, 800, 1080]
 SWEEP_HEIGHTS = range(130, 9001, 7)
 SWEEP_COLUMNS = 8
+STUDENT_SCALE = 2
+STUDENT_STRIP_HEIGHT = 512
 
 
-def fake_upscale(image: np.ndarray) -> np.ndarray:
+def fake_upscale(image: np.ndarray, scale: int = SCALE) -> np.ndarray:
     h, w = image.shape[:2]
-    return cv2.resize(image, (w * SCALE, h * SCALE), interpolation=cv2.INTER_NEAREST)
+    return cv2.resize(image, (w * scale, h * scale), interpolation=cv2.INTER_NEAREST)
 
 
-def round_trip(image: np.ndarray, benchmark_map: dict, legacy_strips: bool, upscale=fake_upscale) -> tuple[int, int]:
+def round_trip(image: np.ndarray, benchmark_map: dict | None, legacy_strips: bool, upscale=fake_upscale,
+               scale: int = SCALE, strip_height: int | None = None) -> tuple[int, int]:
     """Returns (chunk count, max pixel difference vs. the expected page)."""
-    chunks = chunk_page(image, 0, benchmark_map, legacy_strips=legacy_strips)
+    chunks = chunk_page(image, 0, benchmark_map, legacy_strips=legacy_strips, strip_height=strip_height)
     if not legacy_strips:
         heights = {c.y_end - c.y_start for c in chunks}
         assert len(heights) == 1, f"smarter strips must share one height, got {sorted(heights)}"
-    stitched = reassemble([(upscale(c.page_slice), c) for c in chunks], SCALE)
+    stitched = reassemble([(upscale(c.page_slice), c) for c in chunks], scale)
     expected = upscale(image)
-    assert stitched.shape[0] == image.shape[0] * SCALE, f"{stitched.shape[0]} rows != {image.shape[0] * SCALE}"
+    assert stitched.shape[0] == image.shape[0] * scale, f"{stitched.shape[0]} rows != {image.shape[0] * scale}"
     assert stitched.shape == expected.shape, f"shape {stitched.shape} != {expected.shape}"
     return len(chunks), int(np.abs(stitched.astype(int) - expected.astype(int)).max())
 
 
-def fake_upscale_column(image: np.ndarray) -> np.ndarray:
+def fake_upscale_column(image: np.ndarray, scale: int = SCALE) -> np.ndarray:
     """fake_upscale on the first few columns only. Sweep pages are constant along x, so nothing is lost."""
-    return fake_upscale(np.ascontiguousarray(image[:, :SWEEP_COLUMNS]))
+    return fake_upscale(np.ascontiguousarray(image[:, :SWEEP_COLUMNS]), scale)
+
+
+def fake_upscale_column_2x(image: np.ndarray) -> np.ndarray:
+    return fake_upscale_column(image, STUDENT_SCALE)
 
 
 def sweep_page(rng: np.random.Generator, w: int, h: int) -> np.ndarray:
@@ -92,12 +102,15 @@ for legacy_strips, mode in MODES:
 
 print(f"Sweep: widths {SWEEP_WIDTHS}, heights {SWEEP_HEIGHTS.start}-{SWEEP_HEIGHTS[-1]} in steps of {SWEEP_HEIGHTS.step}")
 rng = np.random.default_rng(1)
-for legacy_strips, mode in MODES:
+# (label, legacy_strips, stand-in upscaler, scale, fixed strip height, benchmark map)
+SWEEPS = [(mode, legacy, fake_upscale_column, SCALE, None, benchmark_map) for legacy, mode in MODES]
+SWEEPS.append(("student", False, fake_upscale_column_2x, STUDENT_SCALE, STUDENT_STRIP_HEIGHT, None))
+for mode, legacy_strips, upscale, scale, strip_height, sweep_map in SWEEPS:
     for w in SWEEP_WIDTHS:
         failed, worst, most_chunks = 0, 0, 0
         for h in SWEEP_HEIGHTS:
             try:
-                n, diff = round_trip(sweep_page(rng, w, h), benchmark_map, legacy_strips, fake_upscale_column)
+                n, diff = round_trip(sweep_page(rng, w, h), sweep_map, legacy_strips, upscale, scale, strip_height)
                 ok = diff <= 1
                 worst, most_chunks = max(worst, diff), max(most_chunks, n)
                 if not ok:
@@ -110,7 +123,6 @@ for legacy_strips, mode in MODES:
         failures += failed
         print(f"  {'OK  ' if not failed else 'FAIL'} {mode} strips, width {w}: {len(SWEEP_HEIGHTS) - failed}/{len(SWEEP_HEIGHTS)} heights, "
               f"up to {most_chunks} chunks, max diff {worst}")
-
 
 
 def backend_checks(benchmark_map: dict) -> list[tuple[str, bool]]:
@@ -190,6 +202,49 @@ def backend_checks(benchmark_map: dict) -> list[tuple[str, bool]]:
         checks.append(("planned pages: single-chunk and grown strips run eager", routed["eager"] >= 4))
     finally:
         engine._runtime = saved_runtime
+
+    # Student: one fixed strip height for every width, no benchmark map.
+    saved_runtime = engine._runtime
+    try:
+        runtime = engine._Runtime()
+        runtime.backend, runtime.benchmark_map, runtime.failed_shapes = "trt", None, set()
+        runtime.strip_height = STUDENT_STRIP_HEIGHT
+        engine._runtime = runtime
+        checks.append(("student: 512-row strips use the backend at any width",
+                       all(engine.route(STUDENT_STRIP_HEIGHT, w) == "trt" for w in (436, 690, 800, 1080, 3200))))
+        checks.append(("student: other heights run eager",
+                       all(engine.route(h, 800) == "eager" for h in (130, 379, 511, 513, 528, 898))))
+        shapes = set()
+        for w, h in [(800, 300), (800, 512), (800, 1000), (800, 4540), (690, 3000), (1080, 9000)]:
+            page = np.broadcast_to(np.zeros((h, 1, 3), np.uint8), (h, w, 3))
+            shapes |= {c.page_slice.shape[:2] for c in chunk_page(page, 0, None, strip_height=STUDENT_STRIP_HEIGHT)}
+        checks.append(("student: planned strips are 512 rows except short and grown two-strip pages",
+                       shapes == {(300, 800), (512, 800), (516, 800), (512, 690), (512, 1080)}))
+    finally:
+        engine._runtime = saved_runtime
+
+    # SPAN's convolutions must be folded once at load, not on every forward pass.
+    class FakeConv3XC:
+        def __init__(self):
+            self.folds, self.eval_conv = 0, object()
+        def update_params(self):
+            self.folds += 1
+    class FakeModel:
+        def __init__(self):
+            self.convs = [FakeConv3XC(), FakeConv3XC()]
+        def modules(self):
+            return [self, *self.convs]
+    fake = FakeModel()
+    folded = fold_reparam(fake)
+    for conv in fake.convs:
+        conv.update_params()   # what Conv3XC.forward does on every pass
+    checks.append(("fold_reparam folds each conv once and stops later refolds",
+                   folded == 2 and [c.folds for c in fake.convs] == [1, 1]))
+
+    scaled = torch.tensor([[[[0.4 / 255, 0.6 / 255, 254.5 / 255, 2.0]]]]).repeat(1, 3, 1, 1)
+    checks.append(("postprocess truncates by default and rounds for the student",
+                   engine._postprocess(scaled)[0, :, 0].tolist() == [0, 0, 254, 255]
+                   and engine._postprocess(scaled, round_output=True)[0, :, 0].tolist() == [0, 1, 254, 255]))
 
     checks.append(("padded shape rounds up to a multiple of 4",
                    engine._padded_shape(593, 690) == (596, 692) and engine._padded_shape(512, 800) == (512, 800)))

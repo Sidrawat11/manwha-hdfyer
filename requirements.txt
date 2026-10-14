@@ -17,3 +17,7 @@ matplotlib==3.10.8   # plotter.py only
 #   pip install tensorrt-cu12==11.4.0.106 onnx==1.23.2
 # tensorrt-cu12==11.4.0.106
 # onnx==1.23.2         # only used to export the model when an engine is built
+
+# OPTIONAL: only for --model student (loads the 2x SPAN student).
+#   pip install spandrel==0.4.2
+# spandrel==0.4.2
