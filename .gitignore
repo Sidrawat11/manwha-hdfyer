@@ -47,3 +47,4 @@ exams/
 *.cbz
 **/compare_page*.html
 bench_chapters/
+bench_chapters_par/

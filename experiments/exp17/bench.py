@@ -8,12 +8,15 @@ engine builds and the batch profile (reported separately), the second is the tim
   auto           --batch auto: what the profiler picks on this GPU
   worker sweep   at the best batch: 1, 2, 4, 8, 16 CPU workers (a fast GPU can outrun the CPU finishing)
   eager          batch 1, no TensorRT, for reference
+  parallel       with --parallel "1,2,4,...": only this sweep. N chapters at once in N worker processes
+                 (main.py --parallel N), batch 1, 4 CPU workers per process; total pages/s and s/page per N
 nvidia-smi dmon runs alongside and is saved, so GPU busy/idle can be read per second.
 
 Outputs (no page images): <out>/results.json, <out>/summary.txt, <out>/logs/*.log, <out>/dmon.log
 
 Run from the repo root:
   python experiments/exp17/bench.py --chapters bench_chapters --out experiments/out/exp17/laptop
+  python experiments/exp17/bench.py --chapters bench_chapters_par --parallel 1,2,4,6,8 --out experiments/out/exp17/par
 """
 import argparse, json, os, re, shutil, subprocess, sys, time
 
@@ -23,15 +26,16 @@ from pathlib import Path
 import main
 t = time.perf_counter()
 main.process_all(Path({inp!r}), Path({outp!r}), backend={backend!r}, batch={batch!r},
-                 cpu_workers={workers}, max_inflight={inflight}, overlap=True)
+                 cpu_workers={workers}, max_inflight={inflight}, overlap=True, parallel={parallel})
 """
 
 
-def run(name, chapters, out, backend, batch, workers):
+def run(name, chapters, out, backend, batch, workers, parallel=1):
     """One config in a fresh process; returns parsed timings."""
     res_dir = os.path.join(out, "tmp_results", name)
     shutil.rmtree(res_dir, ignore_errors=True)
-    code = RUN.format(inp=chapters, outp=res_dir, backend=backend, batch=batch, workers=workers, inflight=workers + 2)
+    code = RUN.format(inp=chapters, outp=res_dir, backend=backend, batch=batch, workers=workers, inflight=workers + 2,
+                      parallel=parallel)
     t = time.perf_counter()
     p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                        env={**os.environ, "PYTHONUNBUFFERED": "1"})
@@ -40,23 +44,27 @@ def run(name, chapters, out, backend, batch, workers):
     os.makedirs(os.path.join(out, "logs"), exist_ok=True)
     open(os.path.join(out, "logs", f"{name}.log"), "w").write(log)
     shutil.rmtree(res_dir, ignore_errors=True)  # the upscaled chapters are not kept
-    r = parse(log)
-    r.update({"name": name, "backend": backend, "batch": batch, "workers": workers,
+    r = parse(log, parallel)
+    r.update({"name": name, "backend": backend, "batch": batch, "workers": workers, "parallel": parallel,
               "process_wall_s": round(wall, 2), "ok": p.returncode == 0})
     if r.get("chapters_s") is not None:
         r["startup_s"] = round(wall - r["chapters_s"], 2)
     return r
 
 
-def parse(log):
+def parse(log, parallel=1):
     """Pull the numbers main.py prints."""
     r = {"per_chapter_s": {}}
     for m in re.finditer(r"Done: (.+?) in ([\d.]+)s", log):
         r["per_chapter_s"][m.group(1)] = float(m.group(2))
     m = re.search(r"Finished (\d+) chapters in ([\d.]+)s", log)
-    if m:  # main prints the total in whole seconds; the per-chapter lines have 0.1 s resolution
+    if m:
         r["chapters"] = int(m.group(1))
-        r["chapters_s"] = round(sum(r["per_chapter_s"].values()), 2) if r["per_chapter_s"] else float(m.group(2))
+        if parallel > 1:
+            # Chapters overlap in time, so their times can't be summed: use the wall time of the worker phase.
+            r["chapters_s"] = float(m.group(2))
+        else:  # one at a time: the per-chapter lines (0.1 s resolution) add up to the chapter time
+            r["chapters_s"] = round(sum(r["per_chapter_s"].values()), 2) if r["per_chapter_s"] else float(m.group(2))
     m = re.search(r"TensorRT engines built this run: (\d+), ([\d.]+)s", log)
     r["engines_built"], r["engine_build_s"] = (int(m.group(1)), float(m.group(2))) if m else (0, 0.0)
     r["fallbacks"] = 0 if "Fallbacks: none" in log else len(re.findall(r"!!! FALLBACK", log))
@@ -81,6 +89,8 @@ def main():
     ap.add_argument("--batches", default="1,2,4,8,16")
     ap.add_argument("--workers", default="1,2,4,8,16")
     ap.add_argument("--quick", action="store_true", help="batch 1 and auto only (smoke test)")
+    ap.add_argument("--parallel", default="", help='e.g. "1,2,4,6,8": sweep main.py --parallel N only (batch 1, 4 CPU '
+                                                   'workers per process); the batch and worker sweeps are skipped')
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     ncpu = os.cpu_count() or 4
@@ -93,13 +103,14 @@ def main():
     dmon = subprocess.Popen(["nvidia-smi", "dmon", "-s", "pucm"], stdout=open(os.path.join(a.out, "dmon.log"), "w"))
     results = []
 
-    def go(name, backend, batch, workers):
+    def go(name, backend, batch, workers, parallel=1):
         for phase in ("warm", "timed"):  # warm pays engine builds / profiling; timed is the number we use
-            r = run(f"{name}_{phase}", a.chapters, a.out, backend, batch, workers)
+            r = run(f"{name}_{phase}", a.chapters, a.out, backend, batch, workers, parallel)
             r["phase"], r["config"] = phase, name
             results.append(r)
             if r.get("chapters_s"):
                 r["s_per_page"] = round(r["chapters_s"] / pages, 4)
+                r["pages_per_s"] = round(pages / r["chapters_s"], 2)
             print(f"  {name:14s} {phase:5s} chapters {r.get('chapters_s')} s | {r.get('s_per_page')} s/page | "
                   f"engines built {r['engines_built']} ({r['engine_build_s']:.0f}s) | startup {r.get('startup_s')} s | "
                   f"fallbacks {r['fallbacks']} | ok {r['ok']}", flush=True)
@@ -109,6 +120,10 @@ def main():
                 break
 
     try:
+        if a.parallel:
+            for n in [int(x) for x in a.parallel.split(",") if x.strip()]:
+                go(f"parallel_{n}", "trt", 1, 4, n)
+            return
         batches = [1] if a.quick else [int(x) for x in a.batches.split(",")]
         for b in batches:
             go(f"trt_b{b}_w{many}", "trt", b, many)
@@ -131,12 +146,13 @@ def main():
 
 def write_summary(out, meta, results):
     rows = [r for r in results if r["phase"] == "timed"]
-    lines = [f"Exp 17 benchmark | {meta['gpu']} | {meta['cpus']} CPUs | {meta['pages']} pages, 3 chapters, 3 widths",
-             "Timed run of each config (engines already built). Chapter time excludes process start-up.", "",
-             f"{'config':16s} {'chapters s':>10s} {'s/page':>8s} {'startup s':>9s} {'fallbacks':>9s}"]
+    lines = [f"Exp 17 benchmark | {meta['gpu']} | {meta['cpus']} CPUs | {meta['pages']} pages in {meta['chapters_dir']}",
+             "Timed run of each config (engines already built). Chapter time excludes process start-up "
+             "(and, with --parallel, the warm-up).", "",
+             f"{'config':16s} {'chapters s':>10s} {'s/page':>8s} {'pages/s':>8s} {'startup s':>9s} {'fallbacks':>9s}"]
     for r in rows:
         lines.append(f"{r['config']:16s} {r.get('chapters_s', float('nan')):10.1f} {r.get('s_per_page', float('nan')):8.3f} "
-                     f"{r.get('startup_s', float('nan')):9.1f} {r['fallbacks']:9d}")
+                     f"{r.get('pages_per_s', float('nan')):8.2f} {r.get('startup_s', float('nan')):9.1f} {r['fallbacks']:9d}")
     warm = [r for r in results if r["phase"] == "warm" and r["engines_built"]]
     if warm:
         lines += ["", "One-time engine builds (first sight of each width x batch):"]
