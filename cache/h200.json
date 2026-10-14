@@ -1,0 +1,498 @@
+{
+    "widths_seen": [
+        800,
+        545,
+        900,
+        709,
+        1000,
+        720,
+        760,
+        690,
+        436,
+        1080
+    ],
+    "max_height": 5600,
+    "available_vram": 143182.625,
+    "entries": [
+        {
+            "width": 436,
+            "height": 5600,
+            "valid": true,
+            "peak_vram_mb": 54248.01416015625,
+            "avg_duration_ms": 1080.1922589889728,
+            "max_safe_batch_size": 2
+        },
+        {
+            "width": 545,
+            "height": 5600,
+            "valid": true,
+            "peak_vram_mb": 67793.98291015625,
+            "avg_duration_ms": 1348.0232079746202,
+            "max_safe_batch_size": 1
+        },
+        {
+            "width": 690,
+            "height": 5600,
+            "valid": true,
+            "peak_vram_mb": 85814.49365234375,
+            "avg_duration_ms": 1705.4618340334855,
+            "max_safe_batch_size": 1
+        },
+        {
+            "width": 709,
+            "height": 5600,
+            "valid": true,
+            "peak_vram_mb": 88175.1171875,
+            "avg_duration_ms": 1756.6241789609194,
+            "max_safe_batch_size": 1
+        },
+        {
+            "width": 720,
+            "height": 5600,
+            "valid": true,
+            "peak_vram_mb": 89545.14404296875,
+            "avg_duration_ms": 1784.4934159656987,
+            "max_safe_batch_size": 1
+        },
+        {
+            "width": 760,
+            "height": 5600,
+            "valid": true,
+            "peak_vram_mb": 94513.85546875,
+            "avg_duration_ms": 10570.329706009943,
+            "max_safe_batch_size": 1
+        },
+        {
+            "width": 800,
+            "height": 5600,
+            "valid": true,
+            "peak_vram_mb": 99484.66064453125,
+            "avg_duration_ms": 4189.36931801727,
+            "max_safe_batch_size": 1
+        },
+        {
+            "width": 900,
+            "height": 5600,
+            "valid": true,
+            "peak_vram_mb": 111912.431640625,
+            "avg_duration_ms": 3261.586221982725,
+            "max_safe_batch_size": 1
+        },
+        {
+            "width": 1000,
+            "height": 5600,
+            "valid": true,
+            "peak_vram_mb": 124340.7021484375,
+            "avg_duration_ms": 3286.184113996569,
+            "max_safe_batch_size": 0
+        },
+        {
+            "width": 1080,
+            "height": 5600,
+            "valid": false,
+            "reason": "OOM"
+        },
+        {
+            "width": 436,
+            "height": 2048,
+            "valid": true,
+            "peak_vram_mb": 23211.7998046875,
+            "avg_duration_ms": 350.6041440414265,
+            "max_safe_batch_size": 5
+        },
+        {
+            "width": 545,
+            "height": 2048,
+            "valid": true,
+            "peak_vram_mb": 9573.8896484375,
+            "avg_duration_ms": 437.16457701520994,
+            "max_safe_batch_size": 12
+        },
+        {
+            "width": 690,
+            "height": 2048,
+            "valid": true,
+            "peak_vram_mb": 12104.0263671875,
+            "avg_duration_ms": 551.2764919549227,
+            "max_safe_batch_size": 10
+        },
+        {
+            "width": 709,
+            "height": 2048,
+            "valid": true,
+            "peak_vram_mb": 12435.5615234375,
+            "avg_duration_ms": 568.6126300133765,
+            "max_safe_batch_size": 9
+        },
+        {
+            "width": 720,
+            "height": 2048,
+            "valid": true,
+            "peak_vram_mb": 12627.5029296875,
+            "avg_duration_ms": 575.0414830399677,
+            "max_safe_batch_size": 9
+        },
+        {
+            "width": 760,
+            "height": 2048,
+            "valid": true,
+            "peak_vram_mb": 13326.4716796875,
+            "avg_duration_ms": 605.2989810123108,
+            "max_safe_batch_size": 9
+        },
+        {
+            "width": 800,
+            "height": 2048,
+            "valid": true,
+            "peak_vram_mb": 14023.4404296875,
+            "avg_duration_ms": 639.6860040258616,
+            "max_safe_batch_size": 8
+        },
+        {
+            "width": 900,
+            "height": 2048,
+            "valid": true,
+            "peak_vram_mb": 15768.3623046875,
+            "avg_duration_ms": 717.3859949689358,
+            "max_safe_batch_size": 7
+        },
+        {
+            "width": 1000,
+            "height": 2048,
+            "valid": true,
+            "peak_vram_mb": 17513.2841796875,
+            "avg_duration_ms": 798.5892270226032,
+            "max_safe_batch_size": 6
+        },
+        {
+            "width": 1080,
+            "height": 2048,
+            "valid": true,
+            "peak_vram_mb": 49150.15087890625,
+            "avg_duration_ms": 989.4859030027874,
+            "max_safe_batch_size": 2
+        },
+        {
+            "width": 436,
+            "height": 1024,
+            "valid": true,
+            "peak_vram_mb": 3867.9951171875,
+            "avg_duration_ms": 180.58055796427652,
+            "max_safe_batch_size": 31
+        },
+        {
+            "width": 545,
+            "height": 1024,
+            "valid": true,
+            "peak_vram_mb": 4818.9775390625,
+            "avg_duration_ms": 224.21926801325753,
+            "max_safe_batch_size": 25
+        },
+        {
+            "width": 690,
+            "height": 1024,
+            "valid": true,
+            "peak_vram_mb": 6085.0458984375,
+            "avg_duration_ms": 281.3679370447062,
+            "max_safe_batch_size": 20
+        },
+        {
+            "width": 709,
+            "height": 1024,
+            "valid": true,
+            "peak_vram_mb": 6249.8134765625,
+            "avg_duration_ms": 291.18031199323013,
+            "max_safe_batch_size": 19
+        },
+        {
+            "width": 720,
+            "height": 1024,
+            "valid": true,
+            "peak_vram_mb": 6345.7841796875,
+            "avg_duration_ms": 294.03794003883377,
+            "max_safe_batch_size": 19
+        },
+        {
+            "width": 760,
+            "height": 1024,
+            "valid": true,
+            "peak_vram_mb": 6694.7685546875,
+            "avg_duration_ms": 310.5048760189675,
+            "max_safe_batch_size": 18
+        },
+        {
+            "width": 800,
+            "height": 1024,
+            "valid": true,
+            "peak_vram_mb": 7043.7529296875,
+            "avg_duration_ms": 325.81537403166294,
+            "max_safe_batch_size": 17
+        },
+        {
+            "width": 900,
+            "height": 1024,
+            "valid": true,
+            "peak_vram_mb": 7916.2138671875,
+            "avg_duration_ms": 365.32921402249485,
+            "max_safe_batch_size": 15
+        },
+        {
+            "width": 1000,
+            "height": 1024,
+            "valid": true,
+            "peak_vram_mb": 8788.6748046875,
+            "avg_duration_ms": 406.82661900063977,
+            "max_safe_batch_size": 13
+        },
+        {
+            "width": 1080,
+            "height": 1024,
+            "valid": true,
+            "peak_vram_mb": 9486.6435546875,
+            "avg_duration_ms": 437.5692029716447,
+            "max_safe_batch_size": 12
+        },
+        {
+            "width": 436,
+            "height": 512,
+            "valid": true,
+            "peak_vram_mb": 1966.0302734375,
+            "avg_duration_ms": 96.23382001882419,
+            "max_safe_batch_size": 61
+        },
+        {
+            "width": 545,
+            "height": 512,
+            "valid": true,
+            "peak_vram_mb": 2442.521484375,
+            "avg_duration_ms": 117.45297402376309,
+            "max_safe_batch_size": 49
+        },
+        {
+            "width": 690,
+            "height": 512,
+            "valid": true,
+            "peak_vram_mb": 3074.0556640625,
+            "avg_duration_ms": 146.10240800539032,
+            "max_safe_batch_size": 39
+        },
+        {
+            "width": 709,
+            "height": 512,
+            "valid": true,
+            "peak_vram_mb": 3157.939453125,
+            "avg_duration_ms": 151.04648703709245,
+            "max_safe_batch_size": 38
+        },
+        {
+            "width": 720,
+            "height": 512,
+            "valid": true,
+            "peak_vram_mb": 3204.9248046875,
+            "avg_duration_ms": 151.90393599914387,
+            "max_safe_batch_size": 37
+        },
+        {
+            "width": 760,
+            "height": 512,
+            "valid": true,
+            "peak_vram_mb": 3379.4169921875,
+            "avg_duration_ms": 160.0555219920352,
+            "max_safe_batch_size": 36
+        },
+        {
+            "width": 800,
+            "height": 512,
+            "valid": true,
+            "peak_vram_mb": 3553.9091796875,
+            "avg_duration_ms": 168.88660297263414,
+            "max_safe_batch_size": 34
+        },
+        {
+            "width": 900,
+            "height": 512,
+            "valid": true,
+            "peak_vram_mb": 3990.1396484375,
+            "avg_duration_ms": 187.46611900860444,
+            "max_safe_batch_size": 30
+        },
+        {
+            "width": 1000,
+            "height": 512,
+            "valid": true,
+            "peak_vram_mb": 4426.3701171875,
+            "avg_duration_ms": 208.4652460180223,
+            "max_safe_batch_size": 27
+        },
+        {
+            "width": 1080,
+            "height": 512,
+            "valid": true,
+            "peak_vram_mb": 4775.3544921875,
+            "avg_duration_ms": 224.36817397829145,
+            "max_safe_batch_size": 25
+        },
+        {
+            "width": 436,
+            "height": 256,
+            "valid": true,
+            "peak_vram_mb": 1015.0478515625,
+            "avg_duration_ms": 52.57335299393162,
+            "max_safe_batch_size": 119
+        },
+        {
+            "width": 545,
+            "height": 256,
+            "valid": true,
+            "peak_vram_mb": 1253.72265625,
+            "avg_duration_ms": 63.223375007510185,
+            "max_safe_batch_size": 97
+        },
+        {
+            "width": 690,
+            "height": 256,
+            "valid": true,
+            "peak_vram_mb": 1571.060546875,
+            "avg_duration_ms": 77.25554896751419,
+            "max_safe_batch_size": 77
+        },
+        {
+            "width": 709,
+            "height": 256,
+            "valid": true,
+            "peak_vram_mb": 1611.431640625,
+            "avg_duration_ms": 79.40518599934876,
+            "max_safe_batch_size": 75
+        },
+        {
+            "width": 720,
+            "height": 256,
+            "valid": true,
+            "peak_vram_mb": 1634.4951171875,
+            "avg_duration_ms": 80.11751499725506,
+            "max_safe_batch_size": 74
+        },
+        {
+            "width": 760,
+            "height": 256,
+            "valid": true,
+            "peak_vram_mb": 1721.7412109375,
+            "avg_duration_ms": 85.75176598969847,
+            "max_safe_batch_size": 70
+        },
+        {
+            "width": 800,
+            "height": 256,
+            "valid": true,
+            "peak_vram_mb": 1808.9873046875,
+            "avg_duration_ms": 88.67666800506413,
+            "max_safe_batch_size": 67
+        },
+        {
+            "width": 900,
+            "height": 256,
+            "valid": true,
+            "peak_vram_mb": 2027.1025390625,
+            "avg_duration_ms": 99.19510601321235,
+            "max_safe_batch_size": 60
+        },
+        {
+            "width": 1000,
+            "height": 256,
+            "valid": true,
+            "peak_vram_mb": 2245.2177734375,
+            "avg_duration_ms": 110.06670800270513,
+            "max_safe_batch_size": 54
+        },
+        {
+            "width": 1080,
+            "height": 256,
+            "valid": true,
+            "peak_vram_mb": 2419.7099609375,
+            "avg_duration_ms": 116.91414896631613,
+            "max_safe_batch_size": 50
+        },
+        {
+            "width": 436,
+            "height": 128,
+            "valid": true,
+            "peak_vram_mb": 539.556640625,
+            "avg_duration_ms": 30.448671022895724,
+            "max_safe_batch_size": 225
+        },
+        {
+            "width": 545,
+            "height": 128,
+            "valid": true,
+            "peak_vram_mb": 658.4296875,
+            "avg_duration_ms": 37.969288998283446,
+            "max_safe_batch_size": 184
+        },
+        {
+            "width": 690,
+            "height": 128,
+            "valid": true,
+            "peak_vram_mb": 817.4921875,
+            "avg_duration_ms": 43.3139160159044,
+            "max_safe_batch_size": 148
+        },
+        {
+            "width": 709,
+            "height": 128,
+            "valid": true,
+            "peak_vram_mb": 837.2841796875,
+            "avg_duration_ms": 44.12802396109328,
+            "max_safe_batch_size": 145
+        },
+        {
+            "width": 720,
+            "height": 128,
+            "valid": true,
+            "peak_vram_mb": 849.2802734375,
+            "avg_duration_ms": 44.519898016005754,
+            "max_safe_batch_size": 143
+        },
+        {
+            "width": 760,
+            "height": 128,
+            "valid": true,
+            "peak_vram_mb": 892.9033203125,
+            "avg_duration_ms": 48.04478998994455,
+            "max_safe_batch_size": 136
+        },
+        {
+            "width": 800,
+            "height": 128,
+            "valid": true,
+            "peak_vram_mb": 936.5263671875,
+            "avg_duration_ms": 50.24784797569737,
+            "max_safe_batch_size": 129
+        },
+        {
+            "width": 900,
+            "height": 128,
+            "valid": true,
+            "peak_vram_mb": 1045.583984375,
+            "avg_duration_ms": 54.04997000005096,
+            "max_safe_batch_size": 116
+        },
+        {
+            "width": 1000,
+            "height": 128,
+            "valid": true,
+            "peak_vram_mb": 1154.6416015625,
+            "avg_duration_ms": 60.23100099992007,
+            "max_safe_batch_size": 105
+        },
+        {
+            "width": 1080,
+            "height": 128,
+            "valid": true,
+            "peak_vram_mb": 1241.8876953125,
+            "avg_duration_ms": 63.97934298729524,
+            "max_safe_batch_size": 98
+        }
+    ],
+    "gpu_model": "h200",
+    "profiled_at": "2026-05-27 05:28:04"
+}

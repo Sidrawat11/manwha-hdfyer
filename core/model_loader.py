@@ -8,12 +8,12 @@ Also loads the 2x student (SPAN S, distilled in experiments/exp16) through spand
 """
 
 from pathlib import Path
-from basicsr.archs.rrdbnet_arch import RRDBNet
 import torch
 
 
 def load_rrdbnet(model_path: Path) -> torch.nn.Module:
     """Builds RRDBNet, loads weights via position-based key mapping, and returns the model in eval mode on CUDA."""
+    from basicsr.archs.rrdbnet_arch import RRDBNet   # teacher only: imported here so hdfyer runs without basicsr
     net = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
     loadnet = torch.load(model_path, map_location=torch.device('cpu'))
 

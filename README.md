@@ -1,6 +1,8 @@
 # ManwhaHDFyer
 
-AI-powered manhwa upscaler built for readers who are tired of squinting at compressed webtoon panels. Takes low-quality CBZ chapters downloaded from manga reader apps and produces crisp 2× output using an RRDBNet model (4x-UltraSharp) running on a custom FP16 inference engine.
+AI-powered manhwa upscaler built for readers who are tired of squinting at compressed webtoon panels. Takes low-quality CBZ chapters downloaded from manga reader apps and produces crisp 2× output using hdfyer, our own small 2× model, running on a custom FP16 inference engine (TensorRT when installed).
+
+**One model in production.** `main.py` loads only hdfyer (SPAN S, distilled in [experiments/exp16/](experiments/exp16/) from the look of 4x-UltraSharp; model card in [models/hdfyer/](models/hdfyer/README.md)). 4x-UltraSharp, the "teacher", stays in the code for experiments and tests only. The sections below on the VRAM model, smarter strips and teacher performance describe that teacher path.
 
 Built from scratch as a learning project in ML inference, GPU memory profiling, image processing, and software architecture.
 
@@ -26,13 +28,14 @@ ManwhaHDFyer/
 ├── main.py                    ← Entry point: profile (once per GPU), then process the library
 ├── core/
 │   ├── extractor.py           ← CBZ → decoded images
-│   ├── model_loader.py        ← Builds RRDBNet (teacher) or loads the 2x student; FP16 on CUDA
+│   ├── model_loader.py        ← Loads hdfyer (or builds the teacher's RRDBNet); FP16 on CUDA
 │   ├── packager.py            ← Images → output CBZ (JPEG/PNG)
 │   └── config.py              ← Settings dataclasses (not yet wired into the v2 pipeline)
 ├── profiler/
 │   ├── scanner.py             ← Reads page dimensions from CBZ headers, no decoding
 │   ├── runner.py              ← Measures VRAM + latency per shape; VRAM estimate formula
 │   ├── benchmark.py           ← Benchmark map, batch-size lookup, max chunk height
+│   ├── hdfyer.py              ← hdfyer's best batch size per page width
 │   └── cache.py               ← Per-GPU JSON cache in cache/
 ├── inference/
 │   ├── chunker.py             ← Page → fixed-shape overlapping strips (ChunkMeta)
@@ -50,7 +53,7 @@ ManwhaHDFyer/
 ├── experiments/               ← Numbered experiment scripts behind the strip planner
 ├── legacy/                    ← Phase 1 code, kept for reference (does not run)
 ├── models/                    ← Weight files (gitignored, download manually)
-├── cache/                     ← GPU profiles (gitignored, generated)
+├── cache/                     ← GPU profiles (*.json) and built TensorRT engines (gitignored)
 ├── Manwhas/                   ← Input library (gitignored)
 └── results/                   ← Output, mirrors Manwhas/ (gitignored)
 ```
@@ -184,7 +187,7 @@ to
 from torchvision.transforms.functional import rgb_to_grayscale
 ```
 
-**Model weights:** download **4x-UltraSharp.pth** from [OpenModelDB](https://openmodeldb.info/models/4x-UltraSharp) into `models/`.
+**Model weights:** put the hdfyer weights at `models/hdfyer/hdfyer-2x-s-r2.pth` (not in the repo; see [models/hdfyer/README.md](models/hdfyer/README.md)). Only the experiments need the teacher: **4x-UltraSharp.pth** from [OpenModelDB](https://openmodeldb.info/models/4x-UltraSharp) into `models/`.
 
 ---
 
@@ -196,37 +199,28 @@ Put your library in `Manwhas/` (any folder structure; every `*.cbz` is found rec
 python main.py
 ```
 
-On the first run with a new GPU it profiles first. That takes a few minutes and is cached in `cache/<gpu>.json`; delete the file to re-profile. Output goes to `results/`, mirroring the input tree. Interrupted runs resume where they stopped.
+Output goes to `results/`, mirroring the input tree. Interrupted runs resume where they stopped. The first run on a new GPU builds a TensorRT engine and a short batch profile for each page width it meets; both are cached.
 
-Paths and settings are currently hard-coded in `main.py`. The flags choose the model, the inference runtime and the CPU finishing:
+Paths are currently hard-coded in `main.py`. The flags:
 
 ```bash
-python main.py --backend auto      # auto (default) | trt | compiled | eager
+python main.py --backend auto --batch auto
 ```
 
-`auto` uses TensorRT if it is installed (`pip install tensorrt-cu12 onnx`, optional, see `requirements.txt`), else `torch.compile`, else plain PyTorch. TensorRT engines are built once per strip shape (about 80 s each) and cached in `cache/trt_engines/`; shapes without an engine, and any engine that fails, run on plain PyTorch.
+- `--backend auto|trt|compiled|eager`: `auto` (default) is TensorRT if it is installed (`pip install tensorrt-cu12 onnx`), else plain PyTorch.
+- `--weights PATH`: hdfyer weights (default `models/hdfyer/hdfyer-2x-s-r2.pth`, not in the repo).
+- `--batch auto|N`: strips per forward pass. `auto` (default) uses the best batch measured for this GPU and page width; a number overrides it.
+- `--cpu-workers N`: threads that sharpen and JPEG-encode finished pages while the GPU works on the next ones (default `min(4, cpu count)`).
+- `--max-inflight N`: most upscaled pages queued or in progress at once (default 3), about 45 MB each.
+- `--no-overlap`: finish each page before the GPU continues, for debugging and comparison.
 
-Finished pages are sharpened, downscaled and JPEG-encoded on background threads while the GPU works on the next pages, instead of the GPU waiting for each one. Three flags control it:
+**Strips.** Every strip is exactly 512 rows, at any page width. Strips step down the page with a 32-row overlap; the last one is anchored to the page bottom and its extra overlap discarded, and a page shorter than 512 rows is reflect-padded to one strip and cropped back. So one TensorRT engine per page width covers every strip. Engines are built on first use (the log reports the measured build time) and cached in `cache/trt_engines/`.
 
-- `--cpu-workers N`: threads doing that work (default `min(4, cpu count)`).
-- `--max-inflight N`: most 4× pages queued or in progress at once (default 3); caps memory at about 180 MB per in-flight page.
-- `--no-overlap`: the old serial path, for debugging and comparison.
+**Batch profile.** The first time a page width is seen, hdfyer is timed at batch 1, 2, 4 and 8 for that width (a few seconds, stopping at 75% of VRAM) and the best batch is saved in `cache/<gpu>.json`. A larger batch has to be at least 3% faster per strip to be chosen. The timing is done in eager FP16. On an RTX 4060 Laptop every batch size takes the same time per strip, so the profile picks 1.
 
-Two flags choose the model:
+**Fallbacks.** If an engine fails to build or run, that strip shape runs on plain PyTorch instead; on out-of-memory the failed engine and buffers are freed and the work is retried with a smaller batch. Each of these is logged when it happens (`!!! FALLBACK:` with the chapter, pages, strip shape and reason) and listed again in a summary at the end of the run. Nothing falls back to another model.
 
-- `--model teacher|student`: `teacher` (default) is 4x-UltraSharp, halved to 2×. `student` is a small native 2× model (SPAN S) distilled from the teacher's look in [experiments/exp16/](experiments/exp16/); it needs `pip install spandrel`.
-- `--student-weights PATH`: weights for `--model student` (default `models/hdfyer/hdfyer-2x-s-r2.pth`, not in the repo).
-
-The student runs in 512-row strips at every width with the same 32-row overlap, skips the VRAM profiler, and its pages are sharpened with radius 0.5 and not halved. Same-shape strips are batched, up to 8 per pass or as many as fit in 75% of VRAM. All three backends work; a TensorRT engine is built per strip shape and batch size.
-
-Measured on one 34-page chapter (800 px wide, RTX 4060 Laptop, TensorRT, engines already built):
-
-| | Wall time | Per page |
-|---|---|---|
-| `--model teacher` | 221 s | 6.5 s |
-| `--model student` | 11 s | 0.32 s |
-
-The student's output is not identical to the teacher's: finished pages score SSIM 0.979–0.989 against the teacher's on three pages of that chapter. Batching did not make the student faster on this GPU (batch 1 and batch 6 both took 11 s).
+Measured on one 34-page chapter (800 px wide, RTX 4060 Laptop, TensorRT, engine already built): 10.9 s, 0.32 s per page. The teacher took 221 s on the same chapter. hdfyer's output is not identical to the teacher's: finished pages score SSIM 0.979–0.989 against it on three pages of that chapter.
 
 **Test:**
 

@@ -11,15 +11,6 @@ from collections import defaultdict
 from typing import Callable
 
 
-def vram_batch_size(height: int, width: int, max_batch: int, bytes_per_pixel: float, vram_bytes: int, budget: float = 0.75) -> int:
-    """
-    Largest batch of height x width strips, up to max_batch, whose forward pass stays inside `budget` of VRAM.
-    bytes_per_pixel is the model's measured peak memory per input pixel. Never less than 1.
-    """
-    fits = int(budget * vram_bytes // (bytes_per_pixel * height * width))
-    return max(1, min(max_batch, fits))
-
-
 def build_batches(chunks: list[ChunkMeta], benchmark_map: dict | None,
                   batch_size: int | Callable[[int, int], int] | None = None) -> list[list[ChunkMeta]]:
     """

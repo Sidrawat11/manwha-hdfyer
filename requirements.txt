@@ -5,19 +5,16 @@
 
 torch==2.10.0
 torchvision==0.25.0  # not imported directly; required by basicsr
-basicsr==1.4.2       # RRDBNet architecture only
+spandrel==0.4.2      # loads hdfyer, the production model
 opencv-python==4.13.0.92
 numpy==2.4.2
 imagesize==2.0.0
 tqdm==4.67.3
+basicsr==1.4.2       # teacher (4x-UltraSharp) architecture: experiments only
 matplotlib==3.10.8   # plotter.py only
 
-# OPTIONAL: TensorRT backend (about 2.6x faster than eager PyTorch). The pipeline works without
-# these and falls back to torch.compile, then eager. Uncomment or install by hand:
+# OPTIONAL: TensorRT backend, several times faster than eager PyTorch. The pipeline works without
+# these and runs eager instead. Uncomment or install by hand:
 #   pip install tensorrt-cu12==11.4.0.106 onnx==1.23.2
 # tensorrt-cu12==11.4.0.106
 # onnx==1.23.2         # only used to export the model when an engine is built
-
-# OPTIONAL: only for --model student (loads the 2x SPAN student).
-#   pip install spandrel==0.4.2
-# spandrel==0.4.2
