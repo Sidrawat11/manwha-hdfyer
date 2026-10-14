@@ -8,7 +8,7 @@ from tqdm import tqdm
 import torch.backends.cudnn as cudnn
 from pathlib import Path
 from core import extractor
-from core.model_loader import load_rrdbnet
+from core.model_loader import load_rrdbnet, load_student
 from core.packager import Packager
 from pipeline.page_buffer import PageBuffer
 from pipeline.finisher import PageFinisher
@@ -24,6 +24,15 @@ cudnn.benchmark = True
 
 # True restores the old strips: tallest strip that fits VRAM, 128-row overlap, short last strip.
 LEGACY_STRIPS = False
+
+# The student is a small native 2x model (SPAN S) distilled from the teacher's look (experiments/exp16).
+MODELS = ("teacher", "student")
+MODEL = "teacher"
+TEACHER_WEIGHTS = Path("models/4x-UltraSharp.pth")
+STUDENT_WEIGHTS = Path("models/hdfyer/hdfyer-2x-s-r2.pth")
+STUDENT_SCALE = 2
+STUDENT_STRIP_HEIGHT = 512   # input rows, every width: the teacher's VRAM model doesn't apply
+STUDENT_BATCH = 8            # same-shape strips per forward pass
 
 # CPU finishing (sharpen, cleanup, downscale, encode) runs on threads while the GPU works on the next pages.
 CPU_WORKERS = min(4, os.cpu_count() or 1)
@@ -58,7 +67,12 @@ def run_profiler_pipeline():
 
 
 def process_chapter_v2(cbz_path: Path, model: torch.nn.Module, benchmark_map: dict, output_path: Path, scale: int = 4, legacy_strips: bool = LEGACY_STRIPS,
-                       cpu_workers: int = CPU_WORKERS, max_inflight: int = MAX_INFLIGHT, overlap: bool = True):
+                       cpu_workers: int = CPU_WORKERS, max_inflight: int = MAX_INFLIGHT, overlap: bool = True,
+                       strip_height: int | None = None, batch_size: int | None = None):
+    """
+    Upscales one chapter. `scale` is the model's output scale (4 or 2); the CBZ is 2x either way.
+    strip_height and batch_size replace the benchmark map's values for a model it wasn't profiled for.
+    """
     print(f"Loading pages from {cbz_path}...")
     pages = []
     page_names = {}
@@ -70,10 +84,10 @@ def process_chapter_v2(cbz_path: Path, model: torch.nn.Module, benchmark_map: di
     print("Chunking pages...")
     all_chunks = []
     for page_id, image in enumerate(pages):
-        all_chunks.extend(chunk_page(image, page_id, benchmark_map, legacy_strips=legacy_strips))
+        all_chunks.extend(chunk_page(image, page_id, benchmark_map, legacy_strips=legacy_strips, strip_height=strip_height))
     print(f"Total chunks: {len(all_chunks)}")
 
-    batches = build_batches(all_chunks, benchmark_map)
+    batches = build_batches(all_chunks, benchmark_map, batch_size)
     print(f"Total batches: {len(batches)}")
 
     # Builds any missing TensorRT engine now, so the one-time cost isn't hidden inside the progress bar.
@@ -81,7 +95,7 @@ def process_chapter_v2(cbz_path: Path, model: torch.nn.Module, benchmark_map: di
 
     page_buffer = PageBuffer(scale)
     # A worker's exception surfaces in submit() or when the finisher closes, and fails the chapter.
-    with Packager(output_path, 'jpg', 92) as packager, PageFinisher(packager, cpu_workers, max_inflight, overlap) as finisher:
+    with Packager(output_path, 'jpg', 92) as packager, PageFinisher(packager, cpu_workers, max_inflight, overlap, scale) as finisher:
         for batch in tqdm(batches, desc="Upscaling batches"):
             results = batch_upscale(batch, model, scale)
             for upscaled_array, meta in results:
@@ -97,13 +111,21 @@ def process_chapter_v2(cbz_path: Path, model: torch.nn.Module, benchmark_map: di
 
 
 def process_all(manwha_dir: Path, output_dir: Path, model_path: Path, scale: int = 4, backend: str = BACKEND,
-                cpu_workers: int = CPU_WORKERS, max_inflight: int = MAX_INFLIGHT, overlap: bool = True):
-    print("Loading model...")
-    model = load_rrdbnet(model_path)
+                cpu_workers: int = CPU_WORKERS, max_inflight: int = MAX_INFLIGHT, overlap: bool = True, model_name: str = MODEL):
+    """Upscales the library. model_name "student" loads model_path as the 2x student and overrides scale."""
+    print(f"Loading model ({model_name}: {model_path})...")
+    if model_name == "student":
+        model = load_student(model_path)
+        scale, strip_height, batch_size = STUDENT_SCALE, STUDENT_STRIP_HEIGHT, STUDENT_BATCH
+        benchmark_map = None   # profiled for the teacher; the student uses fixed strips and batches
+        select_backend(backend, model, model_path, benchmark_map, strip_height=strip_height, round_output=True)
+    else:
+        model = load_rrdbnet(model_path)
+        strip_height = batch_size = None
 
-    print("Loading benchmark map...")
-    benchmark_map = load_cache()
-    select_backend(backend, model, model_path, benchmark_map)
+        print("Loading benchmark map...")
+        benchmark_map = load_cache()
+        select_backend(backend, model, model_path, benchmark_map)
 
     cbz_files = sorted(manwha_dir.rglob("*.cbz"))
     print(f"Found {len(cbz_files)} chapters.")
@@ -123,7 +145,8 @@ def process_all(manwha_dir: Path, output_dir: Path, model_path: Path, scale: int
         # Write to .part and rename on success, so an interrupted chapter isn't mistaken for a finished one on resume.
         chapter_start = time.perf_counter()
         part_path = output_path.with_name(output_path.name + ".part")
-        process_chapter_v2(cbz_path, model, benchmark_map, part_path, scale, LEGACY_STRIPS, cpu_workers, max_inflight, overlap)
+        process_chapter_v2(cbz_path, model, benchmark_map, part_path, scale, LEGACY_STRIPS, cpu_workers, max_inflight, overlap,
+                           strip_height, batch_size)
         part_path.replace(output_path)
         torch.cuda.empty_cache()
         completed += 1
@@ -139,6 +162,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Upscale every chapter in Manwhas/ into results/.")
     parser.add_argument("--backend", choices=BACKENDS, default=BACKEND,
                         help="inference runtime: auto picks TensorRT if installed, else torch.compile, else eager (default: %(default)s)")
+    parser.add_argument("--model", choices=MODELS, default=MODEL,
+                        help="teacher: 4x-UltraSharp, halved to 2x. student: the small native 2x model distilled from it, "
+                             "much faster (default: %(default)s)")
+    parser.add_argument("--student-weights", type=Path, default=STUDENT_WEIGHTS,
+                        help="weights for --model student (default: %(default)s)")
     parser.add_argument("--cpu-workers", type=int, default=CPU_WORKERS,
                         help="threads finishing pages (sharpen, downscale, encode) while the GPU works (default: %(default)s)")
     parser.add_argument("--max-inflight", type=int, default=MAX_INFLIGHT,
@@ -149,6 +177,12 @@ if __name__ == "__main__":
     if args.cpu_workers < 1 or args.max_inflight < 1:
         parser.error("--cpu-workers and --max-inflight must be at least 1")
 
-    run_profiler_pipeline()
-    process_all(Path("Manwhas"), Path("results"), Path("models/4x-UltraSharp.pth"), backend=args.backend,
-                cpu_workers=args.cpu_workers, max_inflight=args.max_inflight, overlap=not args.no_overlap)
+    if args.model == "student":
+        if not args.student_weights.exists():
+            parser.error(f"student weights not found: {args.student_weights}")
+        model_path = args.student_weights
+    else:
+        run_profiler_pipeline()   # the VRAM profile is only used by the teacher
+        model_path = TEACHER_WEIGHTS
+    process_all(Path("Manwhas"), Path("results"), model_path, backend=args.backend, cpu_workers=args.cpu_workers,
+                max_inflight=args.max_inflight, overlap=not args.no_overlap, model_name=args.model)

@@ -29,6 +29,7 @@ from core.model_loader import fold_reparam
 from profiler.cache import load_cache
 from inference import engine, trt_backend
 from inference.chunker import chunk_page, get_strip_height
+from inference.batcher import build_batches
 from pipeline.reassembler import reassemble
 from pipeline import finisher as finisher_module
 from pipeline.finisher import PageFinisher
@@ -224,6 +225,23 @@ def backend_checks(benchmark_map: dict) -> list[tuple[str, bool]]:
                        shapes == {(300, 800), (512, 800), (516, 800), (512, 690), (512, 1080)}))
     finally:
         engine._runtime = saved_runtime
+
+    # Batching: a fixed batch size groups same-shape strips across pages and never mixes shapes.
+    chunks = []
+    for page_id, (w, h) in enumerate([(800, 4540), (800, 3000), (690, 2000), (800, 300), (800, 1000)]):
+        page = np.broadcast_to(np.zeros((h, 1, 3), np.uint8), (h, w, 3))
+        chunks += chunk_page(page, page_id, None, strip_height=STUDENT_STRIP_HEIGHT)
+    batches = build_batches(chunks, None, batch_size=8)
+    checks.append(("batching: every chunk is in exactly one batch",
+                   sorted(id(c) for b in batches for c in b) == sorted(id(c) for c in chunks)))
+    checks.append(("batching: a batch holds one shape and at most 8 strips",
+                   all(len(b) <= 8 and len({c.page_slice.shape for c in b}) == 1 for b in batches)))
+    checks.append(("batching: only the last batch of a shape is short",
+                   [len(b) for b in batches if b[0].page_slice.shape[:2] == (512, 800)] == [8, 8, 1]))
+    checks.append(("batching: strips of different pages share a batch",
+                   any(len({c.page_id for c in b}) > 1 for b in batches)))
+    checks.append(("batching: batch size 1 gives one strip per batch",
+                   all(len(b) == 1 for b in build_batches(chunks, None, batch_size=1))))
 
     # SPAN's convolutions must be folded once at load, not on every forward pass.
     class FakeConv3XC:
