@@ -46,3 +46,4 @@ exams/
 # Copyrighted pages: never commit, wherever they end up
 *.cbz
 **/compare_page*.html
+bench_chapters/
