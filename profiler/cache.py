@@ -62,3 +62,31 @@ def save_cache(data: dict) -> bool:
     except Exception as e:
         print(f"Failed to save: {e}")
         return False
+
+
+def load_section(key: str) -> dict:
+    """Returns one top-level section of the current GPU's cache file, or {} if the file or the section is missing."""
+    path = CACHE_DIR / (_get_gpu_slug() + ".json")
+    if not path.exists():
+        return {}
+    with open(path, 'r') as file:
+        return json.load(file).get(key, {})
+
+
+def save_section(key: str, section: dict) -> None:
+    """Writes one top-level section into the current GPU's cache file, leaving everything else in it untouched."""
+    slug = _get_gpu_slug()
+    path = CACHE_DIR / (slug + ".json")
+    data = {}
+    if path.exists():
+        with open(path, 'r') as file:
+            data = json.load(file)
+    data.setdefault("gpu_model", slug)
+    data.setdefault("available_vram", torch.cuda.get_device_properties(0).total_memory / 1024**2)
+    data[key] = section
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    # Write to a temp file and rename, so an interrupted save can't truncate the teacher's profile in the same file.
+    part = path.with_name(path.name + ".part")
+    with open(part, 'w') as f:
+        json.dump(data, f, indent=4)
+    part.replace(path)
