@@ -92,18 +92,22 @@ def _unpad(tensor: torch.Tensor, pad_h: int, pad_w: int, scale: int) -> torch.Te
     return output
 
 
+def _to_bgr_uint8(tensor: torch.Tensor, round_output: bool = False) -> torch.Tensor:
+    """Clamps a 1x3xHxW tensor to [0,1] and converts it, where it is, to BGR uint8 HxWx3. Truncates to uint8 unless round_output."""
+    output_tensor = tensor.clamp(0, 1).to(torch.float32)
+    scaled = output_tensor.squeeze(0) * 255
+    if round_output:
+        scaled = scaled.round()
+    return scaled.byte().flip(0).permute(1, 2, 0)   # CHW RGB -> HWC BGR (a view; .contiguous() makes it real)
+
+
 def _postprocess(tensor: torch.Tensor, round_output: bool = False) -> np.ndarray:
     """
     Clamps to [0,1] and converts a 1x3xHxW GPU tensor to a BGR uint8 HWC numpy array. Truncates to uint8 unless round_output.
     Everything but the final copy runs on the GPU, so the CPU receives finished bytes in the layout OpenCV uses;
     transposing and swapping channels on the CPU cost more than the model's forward pass for a 2x strip.
     """
-    output_tensor = tensor.clamp(0, 1).to(torch.float32)
-    scaled = output_tensor.squeeze(0) * 255
-    if round_output:
-        scaled = scaled.round()
-    bgr = scaled.byte().flip(0).permute(1, 2, 0).contiguous()   # CHW RGB -> HWC BGR
-    return bgr.cpu().numpy()
+    return _to_bgr_uint8(tensor, round_output).contiguous().cpu().numpy()
 
 
 def upscale(image: np.ndarray, model: torch.nn.Module, scale: int = 4) -> np.ndarray:
@@ -427,3 +431,91 @@ def batch_upscale(chunks: list[ChunkMeta], model: torch.nn.Module, scale: int = 
     mid = len(chunks) // 2
     _record("out of memory", f"{reason}. Retrying {len(chunks)} strips as batches of {mid} and {len(chunks) - mid}", shape, chunks)
     return batch_upscale(chunks[:mid], model, scale) + batch_upscale(chunks[mid:], model, scale)
+
+
+# ---------------------------------------------------------------- one batch in flight
+
+_copy_stream = None   # device-to-host copies run here, beside the next batch's compute
+
+
+def _launch(chunks: list[ChunkMeta], model: torch.nn.Module, scale: int):
+    """
+    Queues a batch on the GPU (upload, forward pass, output conversion and crop) and starts copying its results
+    into pinned host memory on a separate stream, without waiting for any of it. Returns a handle for _collect,
+    or None if the batch should take the synchronous path: a shape that isn't the backend's, or anything that raises
+    here (out-of-memory, a missing engine, ...), whose recovery batch_upscale owns.
+    """
+    global _copy_stream
+    shape = chunks[0].page_slice.shape[:2]
+    backend = route(*shape)
+    if backend != _runtime.backend:
+        return None
+    try:
+        outputs = []
+        if backend == "trt":
+            engine_batch = _engine_batch(*_padded_shape(*shape, scale))
+            for start in range(0, len(chunks), engine_batch):
+                group = chunks[start:start + engine_batch]
+                tensors = [_preprocess(chunk.page_slice) for chunk in group]
+                tensors += [tensors[-1]] * (engine_batch - len(group))
+                group_padded, pad_h, pad_w = _pad(torch.cat(tensors), scale)
+                upscaled = _unpad(_runtime.trt.run(group_padded), pad_h, pad_w, scale)
+                outputs += [crop_upscaled(_to_bgr_uint8(t, _runtime.round_output), c, scale).contiguous()
+                            for t, c in zip(torch.split(upscaled, 1, dim=0), group)]
+        else:
+            if _runtime.trt is not None:
+                _runtime.trt.release()
+            batch = torch.cat([_preprocess(chunk.page_slice) for chunk in chunks])
+            batch_padded, pad_h, pad_w = _pad(batch, scale)
+            with torch.no_grad():
+                upscaled = model(batch_padded) if backend == "eager" else _forward_compiled(batch_padded)
+            upscaled = _unpad(upscaled, pad_h, pad_w, scale)
+            outputs = [crop_upscaled(_to_bgr_uint8(t, _runtime.round_output), c, scale).contiguous()
+                       for t, c in zip(torch.split(upscaled, 1, dim=0), chunks)]
+
+        if _copy_stream is None:
+            _copy_stream = torch.cuda.Stream()
+        computed = torch.cuda.Event()
+        computed.record()
+        _copy_stream.wait_event(computed)
+        with torch.cuda.stream(_copy_stream):
+            hosts = [torch.empty(t.shape, dtype=torch.uint8, pin_memory=True).copy_(t, non_blocking=True) for t in outputs]
+            copied = torch.cuda.Event()
+            copied.record()
+        for t in outputs:
+            t.record_stream(_copy_stream)   # the allocator must not reuse them until the copy has read them
+        return hosts, copied, outputs
+    except Exception:
+        return None
+
+
+def _collect(chunks: list[ChunkMeta], handle, model: torch.nn.Module, scale: int) -> list[tuple[np.ndarray, ChunkMeta]]:
+    """Waits for a launched batch's copy to finish and returns its results; a batch that wasn't launched runs now."""
+    if handle is None:
+        return batch_upscale(chunks, model, scale)
+    hosts, copied, _ = handle
+    copied.synchronize()
+    # numpy views of the pinned tensors: each view keeps its tensor (and the pinned block) alive while it is used.
+    return [(host.numpy(), chunk) for host, chunk in zip(hosts, chunks)]
+
+
+def upscale_stream(batches: list[list[ChunkMeta]], model: torch.nn.Module, scale: int = 4):
+    """
+    Yields (batch, results) for each batch, in order, keeping one batch in flight: batch k+1 is uploaded and queued on
+    the GPU, and batch k's results are already copying back, before the caller gets batch k. So the caller's work on a
+    batch (stitching, handing pages to the finisher) overlaps the GPU's work on the next one.
+    Results are identical to calling batch_upscale on each batch, which is what happens on the CPU and for any batch
+    that needs the fallback or out-of-memory handling.
+    """
+    if DEVICE.type != "cuda":
+        for batch in batches:
+            yield batch, batch_upscale(batch, model, scale)
+        return
+    pending = None
+    for batch in batches:
+        handle = _launch(batch, model, scale)
+        if pending is not None:
+            yield pending[0], _collect(pending[0], pending[1], model, scale)
+        pending = (batch, handle)
+    if pending is not None:
+        yield pending[0], _collect(pending[0], pending[1], model, scale)

@@ -22,7 +22,7 @@ from pipeline.finisher import PageFinisher
 from inference.chunker import ChunkMeta, chunk_page
 from inference import engine, trt_backend
 from inference.batcher import build_batches
-from inference.engine import BACKEND, BACKENDS, batch_upscale, engine_stats, prepare_chapter, select_backend
+from inference.engine import BACKEND, BACKENDS, engine_stats, prepare_chapter, select_backend, upscale_stream
 from profiler.hdfyer import BatchProfile
 
 cudnn.benchmark = True
@@ -117,8 +117,8 @@ def process_chapter_v2(cbz_path: Path, model: torch.nn.Module, benchmark_map: di
     page_buffer = PageBuffer(scale)
     # A worker's exception surfaces in submit() or when the finisher closes, and fails the chapter.
     with Packager(output_path, 'jpg', 92) as packager, PageFinisher(packager, cpu_workers, max_inflight, overlap, scale) as finisher:
-        for batch in tqdm(batches, desc="Upscaling batches", disable=quiet):
-            results = batch_upscale(batch, model, scale)
+        # One batch in flight: stitching and hand-off below run while the GPU works on the next batch.
+        for batch, results in tqdm(upscale_stream(batches, model, scale), total=len(batches), desc="Upscaling batches", disable=quiet):
             for upscaled_array, meta in results:
                 completed_page = page_buffer.add(upscaled_array, meta)
                 if completed_page is not None:
