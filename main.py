@@ -9,6 +9,7 @@ import signal
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
+import cv2
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -43,6 +44,7 @@ MAX_INFLIGHT = 3   # stitched pages queued or being finished at once; a 2x page 
 
 # The next chapter is read and decoded in the background (on this many threads) while the current one is upscaled.
 DECODE_THREADS = 4
+_decode_threads = DECODE_THREADS   # what this process uses: DECODE_THREADS, or less with --parallel (configure_threads)
 
 # Chapters at once, each in its own process with its own copy of the model: feeds a big GPU that one Python thread can't.
 PARALLEL = 1
@@ -93,7 +95,7 @@ def process_chapter_v2(cbz_path: Path, model: torch.nn.Module, benchmark_map: di
     """
     log = (lambda *args, **kwargs: None) if quiet else print
     log(f"Loading pages from {cbz_path}...")
-    loaded = extractor.load_chapter(cbz_path, DECODE_THREADS) if pages is None else pages
+    loaded = extractor.load_chapter(cbz_path, _decode_threads) if pages is None else pages
     pages = [image for _, image in loaded]
     page_names = {page_id: name for page_id, (name, _) in enumerate(loaded)}
     del loaded
@@ -188,13 +190,29 @@ def load_runtime(weights: Path, backend: str, batch: str | int, allow_build: boo
     return model, backend, batch_size
 
 
-def prefetched(chapters, load_threads: int = DECODE_THREADS):
+def configure_threads(parallel: int) -> dict:
+    """
+    Caps this process's thread pools at its share of the CPUs, max(1, cpu_count // parallel): torch's intra-op
+    threads, OpenCV's threads and the decode pool. Every pool is only ever lowered (min with what it is now), so a
+    single process (parallel=1) keeps the defaults. Without this, N processes each start a pool sized for the whole
+    machine (torch: one thread per core) and the threads of all of them fight over the same cores.
+    """
+    global _decode_threads
+    share = max(1, (os.cpu_count() or 1) // parallel)
+    torch.set_num_threads(min(torch.get_num_threads(), share))
+    cv2.setNumThreads(min(cv2.getNumThreads(), share))
+    _decode_threads = min(DECODE_THREADS, share)
+    return {"share": share, "torch": torch.get_num_threads(), "opencv": cv2.getNumThreads(), "decode": _decode_threads}
+
+
+def prefetched(chapters, load_threads: int | None = None):
     """
     Yields ((cbz, relative), pages) for each chapter, reading and decoding the NEXT chapter in a background thread
     while the caller works on this one, so the GPU never waits for JPEG/PNG decoding. One chapter ahead: at most
     two decoded chapters are held at once. A chapter that fails to load raises when its turn comes.
     """
     chapters = iter(chapters)
+    load_threads = load_threads or _decode_threads
     with ThreadPoolExecutor(1, thread_name_prefix="prefetch") as reader:
         load = lambda chapter: extractor.load_chapter(chapter[0], load_threads)
         current = next(chapters, None)
@@ -242,6 +260,7 @@ def process_all(manwha_dir: Path, output_dir: Path, weights: Path = WEIGHTS, bac
         return process_all_parallel(manwha_dir, output_dir, weights, backend, batch, cpu_workers, max_inflight, overlap, parallel)
 
     print(f"Loading hdfyer ({weights})...")
+    configure_threads(1)
     model, backend, batch_size = load_runtime(weights, backend, batch)
 
     cbz_files = sorted(manwha_dir.rglob("*.cbz"))
@@ -275,6 +294,7 @@ def _warm_up(weights: Path, backend: str, batch: str | int, cbz_paths: list[str]
     TensorRT engine for the page widths in the to-do chapters, so that no worker ever writes a cache file.
     """
     try:
+        configure_threads(1)   # runs alone, before any worker
         model, backend_used, batch_size = load_runtime(weights, backend, batch)
         engine.set_context("warm-up")
         widths = sorted({w for path in cbz_paths for w, _ in extractor.page_sizes(path)})
@@ -293,15 +313,16 @@ def _warm_up(weights: Path, backend: str, batch: str | int, cbz_paths: list[str]
 
 
 def _worker(worker_id: int, weights: Path, backend: str, batch: str | int, state: dict, output_dir: Path,
-            cpu_workers: int, max_inflight: int, overlap: bool, tasks, results) -> None:
+            cpu_workers: int, max_inflight: int, overlap: bool, parallel: int, tasks, results) -> None:
     """One pipeline: loads hdfyer once, then processes chapters from `tasks` until it gets None."""
     # Ctrl+C is the parent's to handle: it stops the workers, so a half-done chapter is simply left as .part.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
+        threads = configure_threads(parallel)
         model, _, batch_size = load_runtime(weights, backend, batch, allow_build=False, measure=False)
         engine.adopt_warm_up(state["failed_shapes"], state["batch_override"])
         reported = len(engine.fallback_events())
-        results.put({"type": "ready", "worker": worker_id, "events": engine.fallback_events()})
+        results.put({"type": "ready", "worker": worker_id, "events": engine.fallback_events(), "threads": threads})
         def queued():
             while (task := tasks.get()) is not None:
                 yield Path(task[0]), Path(task[1])
@@ -358,7 +379,7 @@ def process_all_parallel(manwha_dir: Path, output_dir: Path, weights: Path, back
     for _ in range(parallel):
         tasks.put(None)
     workers = [ctx.Process(target=_worker, args=(i + 1, weights, backend, batch, warm_up["state"], output_dir,
-                                                 cpu_workers, max_inflight, overlap, tasks, results))
+                                                 cpu_workers, max_inflight, overlap, parallel, tasks, results))
                for i in range(parallel)]
 
     builds, events = list(warm_up["builds"]), list(warm_up["events"])
@@ -379,6 +400,10 @@ def process_all_parallel(manwha_dir: Path, output_dir: Path, weights: Path, back
             kind = message["type"]
             if kind == "ready":
                 events += message["events"]
+                if message["worker"] == 1:
+                    t = message["threads"]
+                    tqdm.write(f"Threads per worker (share of {os.cpu_count()} CPUs: {t['share']}): torch {t['torch']}, "
+                               f"OpenCV {t['opencv']}, decode {t['decode']}, finishing {cpu_workers}.")
             elif kind == "done":
                 completed += 1
                 events += message["events"]

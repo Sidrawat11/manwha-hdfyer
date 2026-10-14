@@ -289,6 +289,22 @@ def parallel_checks() -> list[tuple[str, bool]]:
     finally:
         main.extractor.load_chapter = saved_load
 
+    # Thread pools: a single process keeps its defaults; N processes each get max(1, cpu_count // N).
+    saved_threads = (torch.get_num_threads(), cv2.getNumThreads(), main._decode_threads)
+    try:
+        one = main.configure_threads(1)
+        unchanged = (torch.get_num_threads(), cv2.getNumThreads(), main._decode_threads) == saved_threads
+        many = main.configure_threads(10 ** 6)
+        share = (os.cpu_count() or 1) // 4
+        torch.set_num_threads(saved_threads[0]); cv2.setNumThreads(saved_threads[1]); main._decode_threads = saved_threads[2]
+        four = main.configure_threads(4)
+        checks.append(("threads: --parallel 1 keeps torch, OpenCV and decode threads as they were", unchanged and one["share"] == (os.cpu_count() or 1)))
+        checks.append(("threads: N processes each get at most cpu_count // N, and never less than 1",
+                       many == {"share": 1, "torch": 1, "opencv": 1, "decode": 1}
+                       and four["torch"] <= max(1, share) and four["opencv"] <= max(1, share) and four["decode"] <= main.DECODE_THREADS))
+    finally:
+        torch.set_num_threads(saved_threads[0]); cv2.setNumThreads(saved_threads[1]); main._decode_threads = saved_threads[2]
+
     saved_runtime = engine._runtime
     try:
         engine._runtime = engine._Runtime()
