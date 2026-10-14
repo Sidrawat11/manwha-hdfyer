@@ -244,6 +244,50 @@ def parallel_checks() -> list[tuple[str, bool]]:
         checks.append(("parallel: finished chapters are skipped and an interrupted .part is redone",
                        todo == ["series/ch2.cbz", "series/ch3.cbz"]))
 
+        decoded_in_threads = extractor.load_chapter(cbz, threads=3)
+        checks.append(("decode ahead: threaded decoding gives the same pages, in the same order",
+                       [n for n, _ in decoded_in_threads] == [n for n, _, _ in extractor.extract_images(cbz)]
+                       and all(np.array_equal(a, b) for (_, a), (_, _, b) in
+                               zip(decoded_in_threads, [(n, i, i) for n, i, _ in extractor.extract_images(cbz)]))))
+
+    # Prefetch: chapters come back in order, the next one is loaded while the caller works, never more than one ahead.
+    saved_load = main.extractor.load_chapter
+    loaded, in_flight, most = [], [0], [0]
+    lock = threading.Lock()
+
+    def slow_load(path, threads):
+        with lock:
+            in_flight[0] += 1
+            most[0] = max(most[0], in_flight[0])
+        time.sleep(0.05)
+        loaded.append(path)
+        with lock:
+            in_flight[0] -= 1
+        if path == "bad":
+            raise ValueError("corrupt chapter")
+        return [(f"{path}-page", path)]
+
+    main.extractor.load_chapter = slow_load
+    try:
+        order, ahead = [], []
+        for (path, _), pages in main.prefetched([(f"c{i}", None) for i in range(5)]):
+            time.sleep(0.1)   # "upscaling": the next chapter should load meanwhile
+            order.append(pages[0][1])
+            ahead.append(len(loaded) - len(order))
+        checks.append(("decode ahead: chapters arrive in order, each loaded while the previous one is processed",
+                       order == ["c0", "c1", "c2", "c3", "c4"] and ahead == [1, 1, 1, 1, 0] and most[0] == 1))
+        got = []
+        try:
+            for (path, _), pages in main.prefetched([("c0", None), ("bad", None), ("c2", None)]):
+                got.append(path)
+            raised = False
+        except ValueError:
+            raised = True
+        checks.append(("decode ahead: a chapter that fails to load raises when its turn comes, after the ones before it",
+                       raised and got == ["c0"]))
+    finally:
+        main.extractor.load_chapter = saved_load
+
     saved_runtime = engine._runtime
     try:
         engine._runtime = engine._Runtime()

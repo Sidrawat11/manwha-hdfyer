@@ -7,6 +7,7 @@ decoded image arrays for downstream processing.
 
 import io
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 import cv2
 import imagesize
 import numpy as np
@@ -20,6 +21,18 @@ def extract_images(cbz_path):
             if image is None:
                 continue
             yield name, image, raw_bytes
+
+def load_chapter(cbz_path, threads=4):
+    """
+    Every page extract_images would yield, as a list of (name, image), decoded on `threads` threads.
+    The archive is read on the calling thread (a ZipFile can't be shared between threads); OpenCV's decoders
+    release the GIL, so the decodes run in parallel. Same images as extract_images, same order.
+    """
+    with zipfile.ZipFile(cbz_path) as z:
+        raw = [(name, z.read(name)) for name in _get_image_names(z)]
+    with ThreadPoolExecutor(threads, thread_name_prefix="decode") as pool:
+        images = list(pool.map(lambda item: cv2.imdecode(np.frombuffer(item[1], np.uint8), cv2.IMREAD_COLOR), raw))
+    return [(name, image) for (name, _), image in zip(raw, images) if image is not None]
 
 def page_sizes(cbz_path):
     """(width, height) of every page extract_images would yield, read from the image headers without decoding."""

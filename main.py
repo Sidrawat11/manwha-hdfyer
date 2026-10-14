@@ -8,6 +8,7 @@ import queue
 import signal
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -39,6 +40,9 @@ LEGACY_STRIPS = False
 # CPU finishing (sharpen, cleanup, encode) runs on threads while the GPU works on the next pages.
 CPU_WORKERS = min(4, os.cpu_count() or 1)
 MAX_INFLIGHT = 3   # stitched pages queued or being finished at once; a 2x page is ~45 MB (a teacher 4x page ~180 MB)
+
+# The next chapter is read and decoded in the background (on this many threads) while the current one is upscaled.
+DECODE_THREADS = 4
 
 # Chapters at once, each in its own process with its own copy of the model: feeds a big GPU that one Python thread can't.
 PARALLEL = 1
@@ -79,20 +83,20 @@ def run_teacher_profiler():
 
 def process_chapter_v2(cbz_path: Path, model: torch.nn.Module, benchmark_map: dict, output_path: Path, scale: int = 4, legacy_strips: bool = LEGACY_STRIPS,
                        cpu_workers: int = CPU_WORKERS, max_inflight: int = MAX_INFLIGHT, overlap: bool = True,
-                       strip_height: int | None = None, batch_size=None, quiet: bool = False):
+                       strip_height: int | None = None, batch_size=None, quiet: bool = False, pages=None):
     """
     Upscales one chapter with whatever model the caller loaded. `scale` is that model's output scale (4 or 2);
     the CBZ is 2x either way. hdfyer passes strip_height and batch_size (a number, or a function of strip height
     and width) and no benchmark map; the defaults are the teacher's, for experiments.
     quiet drops the per-chapter progress output (--parallel workers); fallbacks are still printed.
+    pages: the chapter's (name, image) list if it was already loaded (see prefetched); otherwise it is loaded here.
     """
     log = (lambda *args, **kwargs: None) if quiet else print
     log(f"Loading pages from {cbz_path}...")
-    pages = []
-    page_names = {}
-    for page_id, (name, image, _) in enumerate(extractor.extract_images(cbz_path)):
-        pages.append(image)
-        page_names[page_id] = name
+    loaded = extractor.load_chapter(cbz_path, DECODE_THREADS) if pages is None else pages
+    pages = [image for _, image in loaded]
+    page_names = {page_id: name for page_id, (name, _) in enumerate(loaded)}
+    del loaded
     log(f"Loaded {len(pages)} pages.")
 
     log("Chunking pages...")
@@ -184,6 +188,26 @@ def load_runtime(weights: Path, backend: str, batch: str | int, allow_build: boo
     return model, backend, batch_size
 
 
+def prefetched(chapters, load_threads: int = DECODE_THREADS):
+    """
+    Yields ((cbz, relative), pages) for each chapter, reading and decoding the NEXT chapter in a background thread
+    while the caller works on this one, so the GPU never waits for JPEG/PNG decoding. One chapter ahead: at most
+    two decoded chapters are held at once. A chapter that fails to load raises when its turn comes.
+    """
+    chapters = iter(chapters)
+    with ThreadPoolExecutor(1, thread_name_prefix="prefetch") as reader:
+        load = lambda chapter: extractor.load_chapter(chapter[0], load_threads)
+        current = next(chapters, None)
+        pending = reader.submit(load, current) if current is not None else None
+        while current is not None:
+            following = next(chapters, None)
+            pages = pending.result()
+            pending = reader.submit(load, following) if following is not None else None
+            yield current, pages
+            del pages
+            current = following
+
+
 def todo_chapters(manwha_dir: Path, output_dir: Path) -> list[tuple[Path, Path]]:
     """(cbz, relative path) of every chapter without a finished output. A leftover .part does not count as finished."""
     todo = []
@@ -197,7 +221,7 @@ def todo_chapters(manwha_dir: Path, output_dir: Path) -> list[tuple[Path, Path]]
 
 
 def process_chapter(cbz_path: Path, relative: Path, output_dir: Path, model, batch_size, cpu_workers: int, max_inflight: int,
-                    overlap: bool, quiet: bool = False) -> float:
+                    overlap: bool, quiet: bool = False, pages=None) -> float:
     """One chapter into output_dir/relative. Returns its time in seconds."""
     output_path = output_dir / relative
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -205,7 +229,7 @@ def process_chapter(cbz_path: Path, relative: Path, output_dir: Path, model, bat
     chapter_start = time.perf_counter()
     part_path = output_path.with_name(output_path.name + ".part")
     process_chapter_v2(cbz_path, model, None, part_path, SCALE, False, cpu_workers, max_inflight, overlap,
-                       STRIP_HEIGHT, batch_size, quiet=quiet)
+                       STRIP_HEIGHT, batch_size, quiet=quiet, pages=pages)
     part_path.replace(output_path)
     torch.cuda.empty_cache()
     return time.perf_counter() - chapter_start
@@ -227,9 +251,12 @@ def process_all(manwha_dir: Path, output_dir: Path, weights: Path = WEIGHTS, bac
     completed = 0
 
     try:
-        for cbz_path, relative in tqdm(todo_chapters(manwha_dir, output_dir), desc="Processing chapters"):
+        todo = todo_chapters(manwha_dir, output_dir)
+        for (cbz_path, relative), pages in tqdm(prefetched(todo), total=len(todo), desc="Processing chapters"):
             engine.set_context(str(relative))
-            elapsed = process_chapter(cbz_path, relative, output_dir, model, batch_size, cpu_workers, max_inflight, overlap)
+            elapsed = process_chapter(cbz_path, relative, output_dir, model, batch_size, cpu_workers, max_inflight, overlap,
+                                      pages=pages)
+            del pages
             completed += 1
             tqdm.write(f"Done: {relative} in {elapsed:.1f}s")
     finally:
@@ -275,10 +302,15 @@ def _worker(worker_id: int, weights: Path, backend: str, batch: str | int, state
         engine.adopt_warm_up(state["failed_shapes"], state["batch_override"])
         reported = len(engine.fallback_events())
         results.put({"type": "ready", "worker": worker_id, "events": engine.fallback_events()})
-        while (task := tasks.get()) is not None:
-            cbz_path, relative = Path(task[0]), Path(task[1])
+        def queued():
+            while (task := tasks.get()) is not None:
+                yield Path(task[0]), Path(task[1])
+
+        for (cbz_path, relative), pages in prefetched(queued()):
             engine.set_context(f"w{worker_id} {relative}")
-            elapsed = process_chapter(cbz_path, relative, output_dir, model, batch_size, cpu_workers, max_inflight, overlap, quiet=True)
+            elapsed = process_chapter(cbz_path, relative, output_dir, model, batch_size, cpu_workers, max_inflight, overlap,
+                                      quiet=True, pages=pages)
+            del pages
             events = engine.fallback_events()
             results.put({"type": "done", "worker": worker_id, "relative": str(relative), "seconds": elapsed,
                          "events": events[reported:]})
