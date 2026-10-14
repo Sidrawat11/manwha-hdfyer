@@ -269,6 +269,37 @@ def parallel_checks() -> list[tuple[str, bool]]:
     return checks
 
 
+def conversion_checks() -> list[tuple[str, bool]]:
+    """GPU-side pre/post-processing must match the CPU code it replaced, bit for bit. Runs on the CPU device."""
+
+    def old_preprocess(image):
+        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        return torch.from_numpy(np.transpose(rgb, (2, 0, 1))).unsqueeze(0).half()
+
+    def old_postprocess(tensor, round_output):
+        scaled = tensor.clamp(0, 1).to(torch.float32).squeeze(0) * 255
+        if round_output:
+            scaled = scaled.round()
+        return cv2.cvtColor(np.transpose(scaled.byte().numpy(), (1, 2, 0)), cv2.COLOR_RGB2BGR)
+
+    checks = []
+    saved_device = engine.DEVICE
+    engine.DEVICE = torch.device("cpu")
+    try:
+        every_value = np.stack(np.meshgrid(np.arange(256), np.arange(3), indexing="ij"), -1)[..., :1].repeat(3, -1).astype(np.uint8)
+        every_value[:, 1, 1] = every_value[::-1, 0, 0]   # vary the channels, so a channel swap would show
+        new, old = engine._preprocess(every_value), old_preprocess(every_value)
+        checks.append(("conversion: upload-then-convert is bit-identical to the CPU conversion for all 256 values, channel order included",
+                       new.shape == old.shape and torch.equal(new.view(torch.int16), old.view(torch.int16))))
+        y = (torch.rand((1, 3, 40, 24), generator=torch.Generator().manual_seed(5)) * 1.2 - 0.1).half()
+        checks.append(("conversion: output conversion is byte-identical, truncating and rounding",
+                       all(np.array_equal(engine._postprocess(y, r), old_postprocess(y, r)) for r in (False, True))
+                       and engine._postprocess(y).flags["C_CONTIGUOUS"]))
+    finally:
+        engine.DEVICE = saved_device
+    return checks
+
+
 def recovery_checks() -> list[tuple[str, bool]]:
     """Out-of-memory and engine failures must be logged, retried smaller, and still produce the page. Runs on the CPU."""
     checks = []
@@ -545,6 +576,7 @@ def backend_checks(benchmark_map: dict) -> list[tuple[str, bool]]:
 
     checks += profile_checks()
     checks += parallel_checks()
+    checks += conversion_checks()
     checks += recovery_checks()
 
     # SPAN's convolutions must be folded once at load, not on every forward pass.

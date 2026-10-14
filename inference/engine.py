@@ -23,7 +23,6 @@ import gc
 import numpy as np
 import torch
 import torch.nn.functional as F
-import cv2
 from tqdm import tqdm
 from pathlib import Path
 from inference import trt_backend
@@ -56,11 +55,14 @@ _runtime = _Runtime()
 
 
 def _preprocess(image: np.ndarray) -> torch.Tensor:
-    """Converts BGR uint8 HWC numpy array to RGB float16 CHW tensor on GPU."""
-    img_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    normalized = img_rgb.astype(np.float32) / 255.0
-    transpose = np.transpose(normalized, (2, 0, 1))
-    return torch.from_numpy(transpose).unsqueeze(0).to(DEVICE).half()
+    """
+    Converts a BGR uint8 HWC numpy array to an RGB float16 1x3xHxW tensor on the GPU, values in [0, 1].
+    Uploads the uint8 bytes and converts on the GPU: a quarter of the data a float32 upload moves, and no CPU work.
+    The result is bit-identical to converting on the CPU (float32 / 255, then fp16) for every possible input value.
+    """
+    host = torch.from_numpy(np.ascontiguousarray(image))
+    rgb = host.to(DEVICE).permute(2, 0, 1).flip(0)          # HWC BGR -> CHW RGB
+    return (rgb.unsqueeze(0).float() / 255.0).half()
 
 
 def _pad(tensor: torch.Tensor, scale: int) -> tuple[torch.Tensor, int, int]:
@@ -91,15 +93,17 @@ def _unpad(tensor: torch.Tensor, pad_h: int, pad_w: int, scale: int) -> torch.Te
 
 
 def _postprocess(tensor: torch.Tensor, round_output: bool = False) -> np.ndarray:
-    """Clamps to [0,1], converts GPU tensor back to BGR uint8 HWC numpy array. Truncates to uint8 unless round_output."""
+    """
+    Clamps to [0,1] and converts a 1x3xHxW GPU tensor to a BGR uint8 HWC numpy array. Truncates to uint8 unless round_output.
+    Everything but the final copy runs on the GPU, so the CPU receives finished bytes in the layout OpenCV uses;
+    transposing and swapping channels on the CPU cost more than the model's forward pass for a 2x strip.
+    """
     output_tensor = tensor.clamp(0, 1).to(torch.float32)
     scaled = output_tensor.squeeze(0) * 255
     if round_output:
         scaled = scaled.round()
-    output_image_converted = scaled.byte().cpu().numpy()
-    output_image_transposed = np.transpose(output_image_converted, (1, 2, 0))
-    img = cv2.cvtColor(output_image_transposed, cv2.COLOR_RGB2BGR)
-    return img
+    bgr = scaled.byte().flip(0).permute(1, 2, 0).contiguous()   # CHW RGB -> HWC BGR
+    return bgr.cpu().numpy()
 
 
 def upscale(image: np.ndarray, model: torch.nn.Module, scale: int = 4) -> np.ndarray:
