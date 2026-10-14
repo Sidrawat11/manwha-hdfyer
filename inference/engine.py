@@ -54,18 +54,64 @@ class _Runtime:
 _runtime = _Runtime()
 
 
+class _PinnedPool:
+    """
+    Page-locked host buffers, allocated once per process and reused. Allocating pinned memory (cudaHostAlloc) is slow
+    and takes a driver-wide lock, so with several pipeline processes a per-strip allocation serialises them all.
+    A buffer goes back to the pool with the CUDA event after which it is free again; take() reuses the first free
+    buffer that is big enough and allocates only when none is (a new, larger strip shape, or more in flight at once).
+    """
+
+    def __init__(self):
+        self._free = []   # (flat uint8 pinned tensor, event or None)
+        self.allocations = 0
+
+    @staticmethod
+    def _allocate(nbytes: int) -> torch.Tensor:
+        return torch.empty(nbytes, dtype=torch.uint8, pin_memory=True)
+
+    def take(self, shape: tuple[int, ...]) -> tuple[torch.Tensor, torch.Tensor]:
+        """Returns (buffer, view of it with `shape`)."""
+        nbytes = int(np.prod(shape))
+        for i, (buffer, ready) in enumerate(self._free):
+            if buffer.numel() >= nbytes and (ready is None or ready.query()):
+                del self._free[i]
+                return buffer, buffer[:nbytes].view(shape)
+        # Nothing free fits: drop finished buffers that are too small for this shape before growing, so the pool doesn't
+        # keep every size it has ever seen. A buffer whose copy may still be running is kept until it is done.
+        self._free = [(b, e) for b, e in self._free if b.numel() >= nbytes or not (e is None or e.query())]
+        buffer = self._allocate(nbytes)
+        self.allocations += 1
+        return buffer, buffer[:nbytes].view(shape)
+
+    def give(self, buffer: torch.Tensor, ready: "torch.cuda.Event | None" = None) -> None:
+        """Returns a buffer; `ready` is recorded after the last GPU copy that uses it."""
+        self._free.append((buffer, ready))
+
+
+_upload_pool = _PinnedPool()
+_download_pool = _PinnedPool()
+
+
 def _preprocess(image: np.ndarray) -> torch.Tensor:
     """
     Converts a BGR uint8 HWC numpy array to an RGB float16 1x3xHxW tensor on the GPU, values in [0, 1].
     Uploads the uint8 bytes and converts on the GPU: a quarter of the data a float32 upload moves, and no CPU work.
     The result is bit-identical to converting on the CPU (float32 / 255, then fp16) for every possible input value.
     """
-    host = torch.from_numpy(np.ascontiguousarray(image))
     if DEVICE.type == "cuda":
         # From pinned memory the copy is truly asynchronous. From ordinary memory it would wait for everything already
         # queued on the stream, i.e. for the previous batch's forward pass, and the one-batch-in-flight overlap is lost.
-        host = host.pin_memory()
-    rgb = host.to(DEVICE, non_blocking=True).permute(2, 0, 1).flip(0)          # HWC BGR -> CHW RGB
+        # The pinned buffer comes from the process's pool and is filled with a plain numpy copy (one thread).
+        buffer, host = _upload_pool.take(image.shape)
+        np.copyto(host.numpy(), image)
+        device = host.to(DEVICE, non_blocking=True)
+        uploaded = torch.cuda.Event()
+        uploaded.record()
+        _upload_pool.give(buffer, uploaded)
+    else:
+        device = torch.from_numpy(np.ascontiguousarray(image)).to(DEVICE)
+    rgb = device.permute(2, 0, 1).flip(0)          # HWC BGR -> CHW RGB
     return (rgb.unsqueeze(0).float() / 255.0).half()
 
 
@@ -352,6 +398,11 @@ def prepare_chapter(chunks: list[ChunkMeta], scale: int = SCALE) -> None:
             _shrink_or_fall_back(shape, scale, reason, True, shape_chunks)
 
 
+def pinned_allocations() -> int:
+    """How many pinned host buffers this process has allocated (should stop growing after the first few strips)."""
+    return _upload_pool.allocations + _download_pool.allocations
+
+
 def engine_stats() -> dict:
     """Engine switches and load times (deserialize + context creation) since the last prepare_chapter()."""
     if _runtime.trt is None:
@@ -483,7 +534,11 @@ def _launch(chunks: list[ChunkMeta], model: torch.nn.Module, scale: int):
         computed.record()
         _copy_stream.wait_event(computed)
         with torch.cuda.stream(_copy_stream):
-            hosts = [torch.empty(t.shape, dtype=torch.uint8, pin_memory=True).copy_(t, non_blocking=True) for t in outputs]
+            hosts = []
+            for t in outputs:
+                buffer, view = _download_pool.take(tuple(t.shape))
+                view.copy_(t, non_blocking=True)
+                hosts.append((buffer, view))
             copied = torch.cuda.Event()
             copied.record()
         for t in outputs:
@@ -499,8 +554,12 @@ def _collect(chunks: list[ChunkMeta], handle, model: torch.nn.Module, scale: int
         return batch_upscale(chunks, model, scale)
     hosts, copied, _ = handle
     copied.synchronize()
-    # numpy views of the pinned tensors: each view keeps its tensor (and the pinned block) alive while it is used.
-    return [(host.numpy(), chunk) for host, chunk in zip(hosts, chunks)]
+    # Copy out of the pooled pinned buffers (one numpy memcpy each) so the buffers can be reused at once.
+    results = []
+    for (buffer, view), chunk in zip(hosts, chunks):
+        results.append((view.numpy().copy(), chunk))
+        _download_pool.give(buffer)
+    return results
 
 
 def upscale_stream(batches: list[list[ChunkMeta]], model: torch.nn.Module, scale: int = 4):

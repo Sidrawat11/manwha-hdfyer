@@ -16,6 +16,7 @@ Usage: python test.py [path/to/chapter.cbz]   (defaults to the first CBZ in Manw
 """
 
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -344,6 +345,47 @@ def conversion_checks() -> list[tuple[str, bool]]:
     return checks
 
 
+def pinned_pool_checks() -> list[tuple[str, bool]]:
+    """The pinned-buffer pool reuses buffers once their copy is done and allocates only when nothing free fits."""
+
+    class FakeEvent:
+        def __init__(self, done):
+            self.done = done
+
+        def query(self):
+            return self.done
+
+    class CpuPool(engine._PinnedPool):
+        @staticmethod
+        def _allocate(nbytes):
+            return torch.empty(nbytes, dtype=torch.uint8)   # stands in for pinned memory, which needs a GPU
+
+    checks = []
+    pool = CpuPool()
+    a, view = pool.take((512, 800, 3))
+    checks.append(("pinned pool: a buffer comes back as a view of the requested shape", tuple(view.shape) == (512, 800, 3)))
+    pool.give(a, FakeEvent(done=False))
+    b, _ = pool.take((512, 800, 3))
+    checks.append(("pinned pool: a buffer whose copy is still running is not reused", b is not a and pool.allocations == 2))
+    pool.give(b, FakeEvent(done=True))
+    c, _ = pool.take((512, 800, 3))
+    checks.append(("pinned pool: a finished buffer is reused instead of allocating", c is b and pool.allocations == 2))
+    pool.give(c)
+    d, _ = pool.take((300, 800, 3))
+    checks.append(("pinned pool: a smaller shape reuses a bigger free buffer", d is c and pool.allocations == 2))
+    pool.give(d)
+    e, view = pool.take((512, 1500, 3))
+    checks.append(("pinned pool: a larger shape grows the pool, drops finished buffers too small for it, keeps busy ones",
+                   pool.allocations == 3 and tuple(view.shape) == (512, 1500, 3)
+                   and [buffer is a for buffer, _ in pool._free] == [True]))
+    pool.give(e)
+    for _ in range(100):   # steady state: one strip at a time, its copy finished before the next
+        buffer, _ = pool.take((512, 800, 3))
+        pool.give(buffer, FakeEvent(done=True))
+    checks.append(("pinned pool: steady state allocates nothing more", pool.allocations == 3))
+    return checks
+
+
 def recovery_checks() -> list[tuple[str, bool]]:
     """Out-of-memory and engine failures must be logged, retried smaller, and still produce the page. Runs on the CPU."""
     checks = []
@@ -621,6 +663,7 @@ def backend_checks(benchmark_map: dict) -> list[tuple[str, bool]]:
     checks += profile_checks()
     checks += parallel_checks()
     checks += conversion_checks()
+    checks += pinned_pool_checks()
     checks += recovery_checks()
 
     # SPAN's convolutions must be folded once at load, not on every forward pass.
