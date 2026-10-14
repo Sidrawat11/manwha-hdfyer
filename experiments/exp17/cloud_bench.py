@@ -31,8 +31,8 @@ def bench_chapters():
 
 
 # Same versions as the laptop (requirements.txt). cu128 wheels need a driver that supports CUDA 12.8.
-PIP = ("pip install -q torch==2.10.0 --index-url https://download.pytorch.org/whl/cu128 && "
-       "pip install -q spandrel==0.4.2 opencv-python-headless numpy imagesize tqdm "
+PIP = ("python -m pip install -q torch==2.10.0 --index-url https://download.pytorch.org/whl/cu128 && "
+       "python -m pip install -q spandrel==0.4.2 opencv-python-headless numpy imagesize tqdm "
        "tensorrt-cu12==11.4.0.106 onnx==1.23.2 onnxscript")
 
 
@@ -126,18 +126,21 @@ def main():
         print(f"  uploaded in {time.time() - t:.0f}s", flush=True)
 
         bench_args = ["--chapters", "bench_chapters", "--out", f"runs/{a.run}"] + (["--quick"] if a.quick else [])
-        remote_cmd = (f"cd {REMOTE} && ({PIP}) > pip.log 2>&1 && "
+        # `&` binds to the WHOLE && chain, so the chain is one background shell; its own stdout/stdin must not be the
+        # ssh channel, or ssh waits for it to finish (the "stuck at installing" hang of 12-13 Oct).
+        remote_cmd = (f"cd {REMOTE} && setsid nohup bash -c \"({PIP}) > pip.log 2>&1 && "
                       f"python -c 'import torch, tensorrt, spandrel; print(torch.__version__, tensorrt.__version__, torch.cuda.get_device_name(0))' >> pip.log 2>&1 && "
-                      f"PYTHONUNBUFFERED=1 setsid nohup python experiments/exp17/bench.py {' '.join(bench_args)} "
-                      f"> run.log 2>&1 < /dev/null &")
+                      f"PYTHONUNBUFFERED=1 python experiments/exp17/bench.py {' '.join(bench_args)} > run.log 2>&1\" "
+                      f"> /dev/null 2>&1 < /dev/null &")
         print("  installing torch 2.10 + TensorRT 11.4 on the server (a few minutes)...", flush=True)
         try:
-            subprocess.run(ssh + [remote_cmd], capture_output=True, text=True, timeout=900)
+            subprocess.run(ssh + [remote_cmd], capture_output=True, text=True, timeout=60)
         except subprocess.TimeoutExpired:
             pass
-        for _ in range(30):
+        for _ in range(90):  # install runs in the background now: up to 15 min until bench.py appears
             if subprocess.run(ssh + ["pgrep -f exp17/bench.py"], capture_output=True).returncode == 0:
                 break
+            print("  ...installing: " + cr.sh(ssh + [f"du -sh /opt/conda/lib/python3*/site-packages 2>/dev/null | cut -f1"], check=False), flush=True)
             time.sleep(10)
         else:
             raise RuntimeError("bench did not start:\n" + cr.sh(ssh + [f"tail -n 30 {REMOTE}/pip.log"], check=False))

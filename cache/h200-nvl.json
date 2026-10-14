@@ -1,0 +1,79 @@
+{
+    "gpu_model": "h200-nvl",
+    "available_vram": 143166.3125,
+    "hdfyer": {
+        "weights": "hdfyer-2x-s-r2.pth-6f5b223fdf00",
+        "strip_height": 512,
+        "runtime": "eager fp16",
+        "vram_cap": 0.75,
+        "widths": {
+            "800": {
+                "best_batch": 4,
+                "batches": {
+                    "1": {
+                        "ms_per_strip": 6.74,
+                        "peak_vram_mb": 757
+                    },
+                    "2": {
+                        "ms_per_strip": 6.57,
+                        "peak_vram_mb": 1510
+                    },
+                    "4": {
+                        "ms_per_strip": 6.39,
+                        "peak_vram_mb": 3014
+                    },
+                    "8": {
+                        "ms_per_strip": 6.27,
+                        "peak_vram_mb": 6024
+                    }
+                },
+                "stopped": "all batch sizes measured"
+            },
+            "1080": {
+                "best_batch": 4,
+                "batches": {
+                    "1": {
+                        "ms_per_strip": 8.95,
+                        "peak_vram_mb": 1021
+                    },
+                    "2": {
+                        "ms_per_strip": 8.74,
+                        "peak_vram_mb": 2036
+                    },
+                    "4": {
+                        "ms_per_strip": 8.53,
+                        "peak_vram_mb": 4068
+                    },
+                    "8": {
+                        "ms_per_strip": 8.42,
+                        "peak_vram_mb": 8130
+                    }
+                },
+                "stopped": "all batch sizes measured"
+            },
+            "1400": {
+                "best_batch": 4,
+                "batches": {
+                    "1": {
+                        "ms_per_strip": 11.37,
+                        "peak_vram_mb": 1322
+                    },
+                    "2": {
+                        "ms_per_strip": 11.24,
+                        "peak_vram_mb": 2638
+                    },
+                    "4": {
+                        "ms_per_strip": 11.0,
+                        "peak_vram_mb": 5271
+                    },
+                    "8": {
+                        "ms_per_strip": 10.9,
+                        "peak_vram_mb": 10538
+                    }
+                },
+                "stopped": "all batch sizes measured"
+            }
+        },
+        "profiled_at": "2026-10-14 06:00:22"
+    }
+}

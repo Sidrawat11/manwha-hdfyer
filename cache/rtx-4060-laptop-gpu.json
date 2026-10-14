@@ -351,8 +351,44 @@
                     }
                 },
                 "stopped": "all batch sizes measured"
+            },
+            "1080": {
+                "best_batch": 1,
+                "batches": {
+                    "1": {
+                        "ms_per_strip": 77.42,
+                        "peak_vram_mb": 1021
+                    },
+                    "2": {
+                        "ms_per_strip": 77.06,
+                        "peak_vram_mb": 2036
+                    },
+                    "4": {
+                        "ms_per_strip": 76.59,
+                        "peak_vram_mb": 4068
+                    }
+                },
+                "stopped": "batch 8 would need about 8136 MB, over the 6141 MB cap"
+            },
+            "1400": {
+                "best_batch": 1,
+                "batches": {
+                    "1": {
+                        "ms_per_strip": 101.09,
+                        "peak_vram_mb": 1322
+                    },
+                    "2": {
+                        "ms_per_strip": 100.37,
+                        "peak_vram_mb": 2638
+                    },
+                    "4": {
+                        "ms_per_strip": 99.66,
+                        "peak_vram_mb": 5271
+                    }
+                },
+                "stopped": "batch 8 would need about 10542 MB, over the 6141 MB cap"
             }
         },
-        "profiled_at": "2026-10-13 20:53:30"
+        "profiled_at": "2026-10-13 21:35:06"
     }
 }

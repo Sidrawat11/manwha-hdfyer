@@ -189,7 +189,10 @@ def upload_and_start(a, ssh, extra):
 
         run_args = ["--data", a.data, "--out", f"runs/{a.run}", "--steps", str(a.steps), *extra]
         # --no-deps: never let pip replace the image's PyTorch (a multi-GB download); add only the small pieces
-        remote_cmd = (f"cd {REMOTE} && pip install --no-deps spandrel==0.4.2 einops safetensors opencv-python-headless tqdm "
+        # NOTE: `&` below binds to the whole && chain, so that chain is one background shell holding the ssh channel:
+        # that was the "stuck at installing packages" hang (ssh waited for it). The timeout + pgrep below copes with
+        # it; experiments/exp17/cloud_bench.py has the clean fix (setsid bash -c "..." > /dev/null 2>&1 < /dev/null &).
+        remote_cmd = (f"cd {REMOTE} && python -m pip install --no-deps spandrel==0.4.2 einops safetensors opencv-python-headless tqdm "
                       f"> pip.log 2>&1 && python -c 'import spandrel, cv2, torch, torchvision; print(torch.__version__)' && "
                       f"nvidia-smi --query-gpu=name,memory.total --format=csv,noheader && "
                       f"PYTHONUNBUFFERED=1 setsid nohup python experiments/exp16/distill.py all {' '.join(shlex.quote(x) for x in run_args)} "
