@@ -8,12 +8,23 @@ with tag preservation for reassembly.
 from inference.chunker import ChunkMeta
 from profiler.benchmark import get_lookup
 from collections import defaultdict
+from typing import Callable
 
 
-def build_batches(chunks: list[ChunkMeta], benchmark_map: dict | None, batch_size: int | None = None) -> list[list[ChunkMeta]]:
+def vram_batch_size(height: int, width: int, max_batch: int, bytes_per_pixel: float, vram_bytes: int, budget: float = 0.75) -> int:
+    """
+    Largest batch of height x width strips, up to max_batch, whose forward pass stays inside `budget` of VRAM.
+    bytes_per_pixel is the model's measured peak memory per input pixel. Never less than 1.
+    """
+    fits = int(budget * vram_bytes // (bytes_per_pixel * height * width))
+    return max(1, min(max_batch, fits))
+
+
+def build_batches(chunks: list[ChunkMeta], benchmark_map: dict | None,
+                  batch_size: int | Callable[[int, int], int] | None = None) -> list[list[ChunkMeta]]:
     """
     Groups same-shape chunks into VRAM-safe batches using benchmark map batch sizes. 
-    With `batch_size` every shape uses that size and the benchmark map is not consulted.
+    With `batch_size` (a number, or a function of a chunk's height and width) the benchmark map is not consulted.
     Chunks are grouped across pages, so a batch can hold strips of several pages.
     Returns a list of batches, where each batch is a list of ChunkMetas that can be torch.stacked together.
     """
@@ -27,7 +38,7 @@ def build_batches(chunks: list[ChunkMeta], benchmark_map: dict | None, batch_siz
     ## Run through the dict keys and make batches
     for k, v in slice_map.items():
         h, w = k
-        size = batch_size
+        size = batch_size(h, w) if callable(batch_size) else batch_size
         if size is None:
             benchmark = get_lookup(w, h, benchmark_map)
             size = benchmark["max_safe_batch_size"]

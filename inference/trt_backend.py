@@ -1,8 +1,9 @@
-"""TensorRT FP16 runtime for the RRDBNet forward pass.
+"""TensorRT FP16 runtime for the model's forward pass.
 
 Builds one engine per padded strip shape from an ONNX export of the FP16 model,
-caches it in cache/trt_engines/, and runs it on a dedicated CUDA stream. Engines
-are batch 1 and only one is kept live at a time (its activation memory is large).
+caches it in cache/trt_engines/, and runs it on a dedicated CUDA stream. An engine
+has a fixed batch size (1 for the teacher's RRDBNet, several strips for the small
+student) and only one is kept live at a time (its activation memory is large).
 
 The build and run logic is the one measured in experiments/exp14_tensorrt.py.
 tensorrt and onnx are optional: nothing here imports them until an engine is needed.
@@ -44,18 +45,22 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def cache_key(height: int, width: int, model_name: str, model_hash: str, gpu_name: str, trt_version: str) -> str:
+def cache_key(height: int, width: int, model_name: str, model_hash: str, gpu_name: str, trt_version: str,
+              batch: int = 1, arch: str = "rrdb") -> str:
     """
-    Engine file name. An engine is only valid for the exact shape, weights, GPU and TensorRT version
-    it was built with, so all of them are in the name: a mismatch is a different file, never a reuse.
+    Engine file name. An engine is only valid for the exact shape, batch size, weights, GPU and TensorRT
+    version it was built with, so all of them are in the name: a mismatch is a different file, never a reuse.
+    Batch 1 carries no batch tag, which keeps the names of engines built before batching existed.
     """
-    return (f"rrdb_{height}x{width}_{_sanitise(model_name)}-{model_hash[:HASH_LENGTH]}"
+    batch_tag = "" if batch == 1 else f"_b{batch}"
+    return (f"{_sanitise(arch)}_{height}x{width}{batch_tag}_{_sanitise(model_name)}-{model_hash[:HASH_LENGTH]}"
             f"_{_sanitise(gpu_name).lower()}_trt{_sanitise(trt_version)}_fp16.plan")
 
 
 class TrtBackend:
-    def __init__(self, model: torch.nn.Module, model_path: Path, engine_dir: Path = ENGINE_DIR):
+    def __init__(self, model: torch.nn.Module, model_path: Path, engine_dir: Path = ENGINE_DIR, arch: str = "rrdb"):
         import tensorrt as trt
+        self._arch = arch
         self._trt = trt
         self._logger = trt.Logger(trt.Logger.WARNING)
         self._runtime = trt.Runtime(self._logger)
@@ -71,12 +76,13 @@ class TrtBackend:
         self.switches = 0
         self.load_seconds = []
 
-    def engine_path(self, height: int, width: int) -> Path:
-        key = cache_key(height, width, self._model_name, self._model_hash, self._gpu_name, self._trt.__version__)
+    def engine_path(self, height: int, width: int, batch: int = 1) -> Path:
+        key = cache_key(height, width, self._model_name, self._model_hash, self._gpu_name, self._trt.__version__,
+                        batch, self._arch)
         return self._engine_dir / key
 
-    def has_engine(self, height: int, width: int) -> bool:
-        return self.engine_path(height, width).exists()
+    def has_engine(self, height: int, width: int, batch: int = 1) -> bool:
+        return self.engine_path(height, width, batch).exists()
 
     def release(self) -> None:
         """Frees the live engine and its activation memory."""
@@ -88,12 +94,13 @@ class TrtBackend:
         gc.collect()
         torch.cuda.empty_cache()
 
-    def build(self, height: int, width: int) -> Path:
-        """Exports the FP16 model to ONNX for a 1x3xHxW input and builds a strongly typed engine from it."""
+    def build(self, height: int, width: int, batch: int = 1) -> Path:
+        """Exports the FP16 model to ONNX for a fixed batch x 3 x H x W input and builds a strongly typed engine from it."""
         import copy
         trt = self._trt
-        plan_path = self.engine_path(height, width)
-        tqdm.write(f"building TensorRT engine for {height}x{width}, one-time ~80s")
+        plan_path = self.engine_path(height, width, batch)
+        batch_note = "" if batch == 1 else f" (batch {batch})"
+        tqdm.write(f"building TensorRT engine for {height}x{width}{batch_note}, one-time ~80s")
         self._engine_dir.mkdir(parents=True, exist_ok=True)
         self.release()
         torch.cuda.empty_cache()
@@ -102,7 +109,7 @@ class TrtBackend:
         try:
             # FP16 lives in the ONNX file itself: strongly typed networks take their precision from it.
             fp16_model = copy.deepcopy(self._model).half().eval()
-            dummy = torch.zeros((1, 3, height, width), device="cuda", dtype=torch.float16)
+            dummy = torch.zeros((batch, 3, height, width), device="cuda", dtype=torch.float16)
             with torch.no_grad():
                 torch.onnx.export(fp16_model, dummy, str(onnx_path), opset_version=ONNX_OPSET,
                                   input_names=["x"], output_names=["y"], dynamo=False)
@@ -134,14 +141,14 @@ class TrtBackend:
 
         return plan_path
 
-    def _activate(self, height: int, width: int) -> None:
-        """Makes the engine for this shape the live one, building it first if it isn't cached."""
-        if self._shape == (height, width):
+    def _activate(self, height: int, width: int, batch: int) -> None:
+        """Makes the engine for this shape and batch size the live one, building it first if it isn't cached."""
+        if self._shape == (batch, height, width):
             return
         self.release()
-        plan_path = self.engine_path(height, width)
+        plan_path = self.engine_path(height, width, batch)
         if not plan_path.exists():
-            self.build(height, width)
+            self.build(height, width, batch)
 
         start = time.perf_counter()
         engine = self._runtime.deserialize_cuda_engine(plan_path.read_bytes())
@@ -152,18 +159,16 @@ class TrtBackend:
             raise RuntimeError(f"could not create a TensorRT execution context for {plan_path.name}")
         elapsed = time.perf_counter() - start
 
-        self._engine, self._context, self._shape = engine, context, (height, width)
+        self._engine, self._context, self._shape = engine, context, (batch, height, width)
         self.switches += 1
         self.load_seconds.append(elapsed)
         tqdm.write(f"TensorRT engine {height}x{width} loaded in {elapsed:.2f}s")
 
     def run(self, x: torch.Tensor) -> torch.Tensor:
-        """Runs one padded FP16 1x3xHxW tensor through the engine for its shape. Returns the 4x FP16 tensor."""
+        """Runs one padded FP16 Bx3xHxW tensor through the engine for exactly that batch and shape. Returns the upscaled FP16 tensor."""
         trt = self._trt
         batch, _, height, width = x.shape
-        if batch != 1:
-            raise ValueError(f"TensorRT engines are batch 1, got a batch of {batch}")
-        self._activate(height, width)
+        self._activate(height, width, batch)
         engine, context = self._engine, self._context
 
         x_in = x.half().contiguous()

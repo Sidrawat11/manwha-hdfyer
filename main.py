@@ -17,7 +17,7 @@ from profiler.scanner import scan_library
 from profiler.runner import run_profiler
 from profiler.benchmark import build_map, get_lookup
 from inference.chunker import chunk_page
-from inference.batcher import build_batches
+from inference.batcher import build_batches, vram_batch_size
 from inference.engine import BACKEND, BACKENDS, batch_upscale, engine_stats, prepare_chapter, select_backend
 
 cudnn.benchmark = True
@@ -32,7 +32,14 @@ TEACHER_WEIGHTS = Path("models/4x-UltraSharp.pth")
 STUDENT_WEIGHTS = Path("models/hdfyer/hdfyer-2x-s-r2.pth")
 STUDENT_SCALE = 2
 STUDENT_STRIP_HEIGHT = 512   # input rows, every width: the teacher's VRAM model doesn't apply
-STUDENT_BATCH = 8            # same-shape strips per forward pass
+STUDENT_BATCH = 8            # most same-shape strips per forward pass; fewer where VRAM is tight (student_batch_size)
+STUDENT_BYTES_PER_PIXEL = 2410   # measured peak VRAM per input pixel of a batch, eager FP16 (RTX 4060 Laptop)
+
+
+def student_batch_size(height: int, width: int) -> int:
+    """Strips of this shape per forward pass for the student: STUDENT_BATCH, or as many as fit in 75% of VRAM."""
+    vram_bytes = torch.cuda.get_device_properties(0).total_memory
+    return vram_batch_size(height, width, STUDENT_BATCH, STUDENT_BYTES_PER_PIXEL, vram_bytes)
 
 # CPU finishing (sharpen, cleanup, downscale, encode) runs on threads while the GPU works on the next pages.
 CPU_WORKERS = min(4, os.cpu_count() or 1)
@@ -68,10 +75,11 @@ def run_profiler_pipeline():
 
 def process_chapter_v2(cbz_path: Path, model: torch.nn.Module, benchmark_map: dict, output_path: Path, scale: int = 4, legacy_strips: bool = LEGACY_STRIPS,
                        cpu_workers: int = CPU_WORKERS, max_inflight: int = MAX_INFLIGHT, overlap: bool = True,
-                       strip_height: int | None = None, batch_size: int | None = None):
+                       strip_height: int | None = None, batch_size=None):
     """
     Upscales one chapter. `scale` is the model's output scale (4 or 2); the CBZ is 2x either way.
-    strip_height and batch_size replace the benchmark map's values for a model it wasn't profiled for.
+    strip_height and batch_size (a number, or a function of strip height and width) replace the benchmark
+    map's values for a model it wasn't profiled for.
     """
     print(f"Loading pages from {cbz_path}...")
     pages = []
@@ -116,9 +124,10 @@ def process_all(manwha_dir: Path, output_dir: Path, model_path: Path, scale: int
     print(f"Loading model ({model_name}: {model_path})...")
     if model_name == "student":
         model = load_student(model_path)
-        scale, strip_height, batch_size = STUDENT_SCALE, STUDENT_STRIP_HEIGHT, STUDENT_BATCH
+        scale, strip_height, batch_size = STUDENT_SCALE, STUDENT_STRIP_HEIGHT, student_batch_size
         benchmark_map = None   # profiled for the teacher; the student uses fixed strips and batches
-        select_backend(backend, model, model_path, benchmark_map, strip_height=strip_height, round_output=True)
+        select_backend(backend, model, model_path, benchmark_map, strip_height=strip_height, round_output=True,
+                       trt_batch=batch_size, arch="span")
     else:
         model = load_rrdbnet(model_path)
         strip_height = batch_size = None

@@ -29,7 +29,7 @@ from core.model_loader import fold_reparam
 from profiler.cache import load_cache
 from inference import engine, trt_backend
 from inference.chunker import chunk_page, get_strip_height
-from inference.batcher import build_batches
+from inference.batcher import build_batches, vram_batch_size
 from pipeline.reassembler import reassemble
 from pipeline import finisher as finisher_module
 from pipeline.finisher import PageFinisher
@@ -142,6 +142,12 @@ def backend_checks(benchmark_map: dict) -> list[tuple[str, bool]]:
                "gpu_name": "NVIDIA H200", "trt_version": "11.5.0.1"}
     for field, value in changes.items():
         checks.append((f"cache key changes with {field}", trt_backend.cache_key(**{**base, field: value}) != key))
+    checks.append(("cache key changes with batch", trt_backend.cache_key(**base, batch=8) != key))
+    checks.append(("cache key changes between batch sizes above 1",
+                   trt_backend.cache_key(**base, batch=8) != trt_backend.cache_key(**base, batch=4)))
+    checks.append(("cache key changes with arch", trt_backend.cache_key(**base, arch="span") != key))
+    checks.append(("batch 1 keeps the pre-batching engine name", trt_backend.cache_key(**base, batch=1, arch="rrdb") ==
+                   "rrdb_512x800_4x-UltraSharp.pth-aaaaaaaaaaaa_nvidia-geforce-rtx-4060-laptop-gpu_trt11.4.0.106_fp16.plan"))
     checks.append(("cache key ignores the hash past 12 chars",
                    trt_backend.cache_key(**{**base, "model_hash": "a" * 12 + "b" * 52}) == key))
 
@@ -242,6 +248,28 @@ def backend_checks(benchmark_map: dict) -> list[tuple[str, bool]]:
                    any(len({c.page_id for c in b}) > 1 for b in batches)))
     checks.append(("batching: batch size 1 gives one strip per batch",
                    all(len(b) == 1 for b in build_batches(chunks, None, batch_size=1))))
+
+    GB = 1024 ** 3
+    sizes = {w: vram_batch_size(512, w, 8, 2410, 8 * GB) for w in (690, 800, 1080, 1500, 3200)}
+    checks.append(("batching: batch shrinks with width on an 8 GB card", sizes == {690: 7, 800: 6, 1080: 4, 1500: 3, 3200: 1}))
+    checks.append(("batching: batch is capped at the maximum on a big card",
+                   all(vram_batch_size(512, w, 8, 2410, 140 * GB) == 8 for w in (690, 800, 1500, 3200))))
+    checks.append(("batching: batch is never below 1", vram_batch_size(4096, 4096, 8, 2410, 1 * GB) == 1))
+    batches = build_batches(chunks, None, batch_size=lambda h, w: vram_batch_size(h, w, 8, 2410, 8 * GB))
+    checks.append(("batching: a per-shape batch size is applied to each shape",
+                   max(len(b) for b in batches if b[0].page_slice.shape[:2] == (512, 800)) == 6
+                   and max(len(b) for b in batches if b[0].page_slice.shape[:2] == (512, 690)) <= 7))
+
+    saved_runtime = engine._runtime
+    try:
+        runtime = engine._Runtime()
+        engine._runtime = runtime
+        checks.append(("engine batch defaults to 1 (teacher)", engine._engine_batch(512, 800) == 1))
+        runtime.trt_batch = lambda h, w: vram_batch_size(h, w, 8, 2410, 8 * GB)
+        checks.append(("engine batch follows the per-shape batch size", engine._engine_batch(512, 800) == 6
+                       and engine._engine_batch(512, 1500) == 3))
+    finally:
+        engine._runtime = saved_runtime
 
     # SPAN's convolutions must be folded once at load, not on every forward pass.
     class FakeConv3XC:

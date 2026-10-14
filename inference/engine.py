@@ -5,7 +5,7 @@ Handles FP16 casting, tensor pre/post processing, and exposes a clean upscale
 interface to the pipeline.
 
 The forward pass has three runtimes, chosen once with select_backend():
-  trt       TensorRT FP16 engines (inference/trt_backend.py), batch 1
+  trt       TensorRT FP16 engines (inference/trt_backend.py), fixed batch size per engine
   compiled  torch.compile on a channels_last copy of the model
   eager     plain PyTorch FP16
 trt and compiled only handle each width's standard strip shape; every other shape runs
@@ -41,6 +41,7 @@ class _Runtime:
     failed_shapes = set()   # (h, w) chunk shapes that fell back to eager for the rest of the run
     strip_height = None  # fixed standard strip height (student); None = the benchmark map's (teacher)
     round_output = False   # round to uint8 instead of truncating (student)
+    trt_batch = 1        # strips per TensorRT engine pass: an int, or a function of the padded (height, width)
 
 
 _runtime = _Runtime()
@@ -150,11 +151,13 @@ def resolve_backend(requested: str, trt_ok: bool | None = None, compile_ok: bool
 
 
 def select_backend(requested: str, model: torch.nn.Module, model_path: Path, benchmark_map: dict | None,
-                   strip_height: int | None = None, round_output: bool = False) -> str:
+                   strip_height: int | None = None, round_output: bool = False, trt_batch: int = 1, arch: str = "rrdb") -> str:
     """
     Chooses the runtime for the rest of the run and prints it once. Returns the backend in use.
     strip_height: the model's fixed standard strip height, if it doesn't use the benchmark map's.
     round_output: round the model's output to uint8 instead of truncating it.
+    trt_batch: strips per TensorRT engine pass, an int or a function of the padded (height, width).
+    arch: short model-family name for the engine file names.
     """
     global _runtime
     _runtime = _Runtime()
@@ -162,11 +165,12 @@ def select_backend(requested: str, model: torch.nn.Module, model_path: Path, ben
     _runtime.benchmark_map = benchmark_map
     _runtime.strip_height = strip_height
     _runtime.round_output = round_output
+    _runtime.trt_batch = trt_batch
     backend = resolve_backend(requested)
 
     if backend == "trt":
         try:
-            _runtime.trt = trt_backend.TrtBackend(model, model_path)
+            _runtime.trt = trt_backend.TrtBackend(model, model_path, arch=arch)
         except Exception as e:
             tqdm.write(f"TensorRT could not start ({type(e).__name__}: {e}), falling back.")
             backend = resolve_backend("compiled")
@@ -204,6 +208,12 @@ def _padded_shape(height: int, width: int, scale: int = SCALE) -> tuple[int, int
     return height + (-height) % scale, width + (-width) % scale
 
 
+def _engine_batch(height: int, width: int) -> int:
+    """Batch size of the TensorRT engine for a padded strip shape."""
+    batch = _runtime.trt_batch
+    return batch(height, width) if callable(batch) else batch
+
+
 def _fall_back(shape: tuple[int, int], error: Exception) -> None:
     """Logs the failure once and sends this shape to eager for the rest of the run."""
     _runtime.failed_shapes.add(shape)
@@ -222,10 +232,11 @@ def prepare_chapter(chunks: list[ChunkMeta], scale: int = SCALE) -> None:
         if route(*shape) != "trt":
             continue
         height, width = _padded_shape(*shape, scale)
-        if _runtime.trt.has_engine(height, width):
+        batch = _engine_batch(height, width)
+        if _runtime.trt.has_engine(height, width, batch):
             continue
         try:
-            _runtime.trt.build(height, width)
+            _runtime.trt.build(height, width, batch)
         except Exception as e:
             _fall_back(shape, e)
 
@@ -238,12 +249,20 @@ def engine_stats() -> dict:
 
 
 def _forward_trt(chunks: list[ChunkMeta], scale: int) -> list[tuple[np.ndarray, ChunkMeta]]:
-    """TensorRT engines are batch 1: runs the batch's chunks through the engine one at a time."""
+    """
+    TensorRT engines have a fixed batch size: runs the chunks through the engine that many at a time.
+    A short last group is padded by repeating its last strip, and the padding's output is dropped.
+    """
+    engine_batch = _engine_batch(*_padded_shape(*chunks[0].page_slice.shape[:2], scale))
     results = []
-    for chunk in chunks:
-        chunk_padded, pad_h, pad_w = _pad(_preprocess(chunk.page_slice), scale)
-        upscaled = _runtime.trt.run(chunk_padded)
-        results.append((_postprocess(_unpad(upscaled, pad_h, pad_w, scale), _runtime.round_output), chunk))
+    for start in range(0, len(chunks), engine_batch):
+        group = chunks[start:start + engine_batch]
+        tensors = [_preprocess(chunk.page_slice) for chunk in group]
+        tensors += [tensors[-1]] * (engine_batch - len(group))
+        group_padded, pad_h, pad_w = _pad(torch.cat(tensors), scale)
+        upscaled = _unpad(_runtime.trt.run(group_padded), pad_h, pad_w, scale)
+        for tensor, chunk in zip(torch.split(upscaled, 1, dim=0), group):
+            results.append((_postprocess(tensor, _runtime.round_output), chunk))
     return results
 
 
@@ -254,8 +273,8 @@ def _forward_compiled(x: torch.Tensor) -> torch.Tensor:
 def batch_upscale(chunks: list[ChunkMeta], model: torch.nn.Module, scale: int = 4) -> list[tuple[np.ndarray, ChunkMeta]]:
     """
     Upscales a batch of same-shape chunks.
-    Standard strips go to the selected backend (see route()); TensorRT takes them one at a time, the others in a
-    single forward pass. Preprocesses each chunk, runs the model, splits and postprocesses each result.
+    Standard strips go to the selected backend (see route()); TensorRT takes them in groups of its engine's
+    batch size, the others in a single forward pass. Preprocesses each chunk, runs the model, splits and postprocesses each result.
     If the backend raises, the shape falls back to eager for the rest of the run.
     On out-of-memory the batch is split in half and each half retried; a batch of 1 that still fails re-raises.
     Returns paired upscaled arrays and their ChunkMetas.
