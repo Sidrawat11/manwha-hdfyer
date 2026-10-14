@@ -9,8 +9,12 @@ __pycache__/
 
 # Manhwa content - never commit
 Manwhas/
-cache/
 docs/
+
+# GPU profiles in cache/*.json may be committed; built TensorRT engines never
+cache/*
+!cache/*.json
+cache/trt_engines/
 
 # Temp & logs (we don't want these in Git)
 TempExtract/
