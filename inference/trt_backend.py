@@ -75,6 +75,7 @@ class TrtBackend:
         self._stream = None
         self.switches = 0
         self.load_seconds = []
+        self.build_seconds = []   # measured time of every engine built in this run
 
     def engine_path(self, height: int, width: int, batch: int = 1) -> Path:
         key = cache_key(height, width, self._model_name, self._model_hash, self._gpu_name, self._trt.__version__,
@@ -100,7 +101,8 @@ class TrtBackend:
         trt = self._trt
         plan_path = self.engine_path(height, width, batch)
         batch_note = "" if batch == 1 else f" (batch {batch})"
-        tqdm.write(f"building TensorRT engine for {height}x{width}{batch_note}, one-time ~80s")
+        tqdm.write(f"building TensorRT engine for {height}x{width}{batch_note} (one-time, cached afterwards)...")
+        start = time.perf_counter()
         self._engine_dir.mkdir(parents=True, exist_ok=True)
         self.release()
         torch.cuda.empty_cache()
@@ -139,6 +141,9 @@ class TrtBackend:
             gc.collect()
             torch.cuda.empty_cache()
 
+        elapsed = time.perf_counter() - start
+        self.build_seconds.append(elapsed)
+        tqdm.write(f"built TensorRT engine for {height}x{width}{batch_note} in {elapsed:.1f}s")
         return plan_path
 
     def _activate(self, height: int, width: int, batch: int) -> None:
