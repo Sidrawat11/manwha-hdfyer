@@ -306,6 +306,19 @@ def recovery_checks() -> list[tuple[str, bool]]:
                        same(page, expected) and [e["kind"] for e in events] == ["trt -> eager"]
                        and "TensorRT execution failed" in events[0]["reason"] and events[0]["pages"] == ["007.jpg"]))
 
+        # A --parallel worker may not build: a missing engine goes straight to eager, once, without trying smaller batches.
+        eager = FakeOutOfMemory()
+        trt = FakeTrt(FakeOutOfMemory())
+        trt.allow_build = False
+
+        def missing(x):
+            raise trt_backend.EngineMissingError("no cached engine for 64x40 (batch 8) and this process may not build one")
+        trt.run = missing
+        page, events = run_page("trt", eager, trt)
+        checks.append(("recovery: a worker with no cached engine falls back to eager at once, without building",
+                       same(page, expected) and trt.built == [] and [e["kind"] for e in events] == ["trt -> eager"]
+                       and "may not build" in events[0]["reason"]))
+
         # A strip that is not the standard shape has no engine: it runs eager and that is reported, every time.
         runtime = engine._Runtime()
         runtime.backend, runtime.strip_height, runtime.round_output = "trt", strip, True

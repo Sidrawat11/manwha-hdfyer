@@ -308,6 +308,8 @@ def prepare_chapter(chunks: list[ChunkMeta], scale: int = SCALE) -> None:
         return
     _runtime.trt.switches = 0
     _runtime.trt.load_seconds = []
+    if not getattr(_runtime.trt, "allow_build", True):
+        return   # a --parallel worker: engines were built in the warm-up; a missing one surfaces (loudly) when used
 
     by_shape = {}
     for chunk in chunks:
@@ -376,7 +378,8 @@ def batch_upscale(chunks: list[ChunkMeta], model: torch.nn.Module, scale: int = 
             return _forward_trt(chunks, scale)
         except Exception as e:
             reason = _describe(e)
-            shrinkable = _is_oom(e) or isinstance(e, trt_backend.EngineBuildError)
+            # A missing engine in a process that may not build one goes straight to eager: a smaller batch won't exist either.
+            shrinkable = (_is_oom(e) or isinstance(e, trt_backend.EngineBuildError)) and not isinstance(e, trt_backend.EngineMissingError)
         # Outside the except block, so the failed pass's tensors are no longer held by the traceback.
         _shrink_or_fall_back(shape, scale, reason, shrinkable, chunks)
         return batch_upscale(chunks, model, scale)

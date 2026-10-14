@@ -4,6 +4,7 @@ Reads and writes GPU-keyed JSON files. Checks for an existing cache on startup
 and skips profiling if the current GPU's map is already present.
 """
 
+import os
 from pathlib import Path
 import torch
 import json
@@ -56,8 +57,7 @@ def save_cache(data: dict) -> bool:
     data["available_vram"] = torch.cuda.get_device_properties(0).total_memory / 1024**2
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        with open(path, 'w') as f:
-            json.dump(data, f, indent=4)
+        _write_atomic(path, data)
         return True
     except Exception as e:
         print(f"Failed to save: {e}")
@@ -85,8 +85,13 @@ def save_section(key: str, section: dict) -> None:
     data.setdefault("available_vram", torch.cuda.get_device_properties(0).total_memory / 1024**2)
     data[key] = section
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    # Write to a temp file and rename, so an interrupted save can't truncate the teacher's profile in the same file.
-    part = path.with_name(path.name + ".part")
+    _write_atomic(path, data)
+
+
+def _write_atomic(path: Path, data: dict) -> None:
+    """Writes JSON to a temp file private to this process, then renames it over `path` (atomic on one filesystem),
+    so a reader never sees a half-written file and concurrent writers never share a temp file."""
+    part = path.with_name(f"{path.name}.{os.getpid()}.part")
     with open(part, 'w') as f:
         json.dump(data, f, indent=4)
-    part.replace(path)
+    os.replace(part, path)

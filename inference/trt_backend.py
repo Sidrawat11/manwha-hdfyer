@@ -11,6 +11,7 @@ tensorrt and onnx are optional: nothing here imports them until an engine is nee
 
 import gc
 import hashlib
+import os
 import re
 import time
 from pathlib import Path
@@ -25,6 +26,15 @@ HASH_LENGTH = 12
 
 class EngineBuildError(RuntimeError):
     """An engine could not be built (export, parse or TensorRT build failed, often for lack of VRAM)."""
+
+
+class EngineMissingError(RuntimeError):
+    """An engine is needed but not cached, and this process may not build one (a --parallel worker)."""
+
+
+def _private_temp(path: Path, suffix: str) -> Path:
+    """A temp file next to `path` that no other process uses, so concurrent writers never share one."""
+    return path.with_name(f"{path.name}.{os.getpid()}{suffix}")
 
 
 def is_available() -> bool:
@@ -80,6 +90,7 @@ class TrtBackend:
         self.switches = 0
         self.load_seconds = []
         self.build_seconds = []   # measured time of every engine built in this run
+        self.allow_build = True   # False in --parallel workers: engines come from the warm-up, never built there
 
     def engine_path(self, height: int, width: int, batch: int = 1) -> Path:
         key = cache_key(height, width, self._model_name, self._model_hash, self._gpu_name, self._trt.__version__,
@@ -111,7 +122,7 @@ class TrtBackend:
         self.release()
         torch.cuda.empty_cache()
 
-        onnx_path = plan_path.with_suffix(".onnx")
+        onnx_path = _private_temp(plan_path, ".onnx")
         failure = None
         try:
             # FP16 lives in the ONNX file itself: strongly typed networks take their precision from it.
@@ -136,10 +147,11 @@ class TrtBackend:
             if serialized is None:
                 raise RuntimeError("TensorRT engine build failed")
 
-            # Write to .part and rename, so an interrupted build never leaves a truncated engine behind.
-            part_path = plan_path.with_name(plan_path.name + ".part")
+            # Write to a private temp file and rename (atomic), so an interrupted build never leaves a truncated
+            # engine behind, and two processes building the same engine can't interleave their bytes.
+            part_path = _private_temp(plan_path, ".part")
             part_path.write_bytes(bytes(serialized))
-            part_path.replace(plan_path)
+            os.replace(part_path, plan_path)
             del builder, network, parser, config, serialized
         except Exception as e:
             failure = f"{type(e).__name__}: {str(e).splitlines()[0] if str(e) else ''}"
@@ -164,6 +176,8 @@ class TrtBackend:
         self.release()
         plan_path = self.engine_path(height, width, batch)
         if not plan_path.exists():
+            if not self.allow_build:
+                raise EngineMissingError(f"no cached engine for {height}x{width} (batch {batch}) and this process may not build one")
             self.build(height, width, batch)
 
         start = time.perf_counter()
