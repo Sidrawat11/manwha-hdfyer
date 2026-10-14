@@ -22,7 +22,7 @@ from tqdm import tqdm
 from core.model_loader import load_rrdbnet
 from pathlib import Path
 from inference import trt_backend
-from inference.chunker import ChunkMeta, get_strip_height
+from inference.chunker import ChunkMeta, crop_upscaled, get_strip_height
 
 DEVICE = torch.device('cuda')
 DTYPE = torch.float16
@@ -126,7 +126,7 @@ def _forward_batch(chunks: list[ChunkMeta], model: torch.nn.Module, scale: int, 
     individual = torch.split(upscaled_unpadded, 1, dim=0)
     results = []
     for tensor, meta in zip(individual, chunks):
-        results.append((_postprocess(tensor, _runtime.round_output), meta))
+        results.append((crop_upscaled(_postprocess(tensor, _runtime.round_output), meta, scale), meta))
 
     return results
 
@@ -262,7 +262,7 @@ def _forward_trt(chunks: list[ChunkMeta], scale: int) -> list[tuple[np.ndarray, 
         group_padded, pad_h, pad_w = _pad(torch.cat(tensors), scale)
         upscaled = _unpad(_runtime.trt.run(group_padded), pad_h, pad_w, scale)
         for tensor, chunk in zip(torch.split(upscaled, 1, dim=0), group):
-            results.append((_postprocess(tensor, _runtime.round_output), chunk))
+            results.append((crop_upscaled(_postprocess(tensor, _runtime.round_output), chunk, scale), chunk))
     return results
 
 

@@ -6,7 +6,7 @@ page. Also covers a small page that fits without chunking.
 
 Every case runs in both strip modes (smarter strips and legacy). A synthetic sweep
 then covers widths 690, 800 and 1080 at every page height from 130 to 9000 in steps of 7,
-and repeats it for the 2x student's strips (fixed 512 rows, scale 2).
+and repeats it for hdfyer's fixed-shape strips (512 rows, anchored or padded, scale 2).
 
 Last come the inference-backend checks (engine cache key, backend selection, shape routing).
 They touch no GPU either. Finally the page-finishing checks run fake 4x pages through the
@@ -28,7 +28,7 @@ from core import extractor
 from core.model_loader import fold_reparam
 from profiler.cache import load_cache
 from inference import engine, trt_backend
-from inference.chunker import chunk_page, get_strip_height
+from inference.chunker import chunk_page, crop_upscaled, get_strip_height
 from inference.batcher import build_batches, vram_batch_size
 from pipeline.reassembler import reassemble
 from pipeline import finisher as finisher_module
@@ -41,6 +41,7 @@ SCALE = 4
 MODES = [(False, "smarter"), (True, "legacy")]
 SWEEP_WIDTHS = [690, 800, 1080]
 SWEEP_HEIGHTS = range(130, 9001, 7)
+SHORT_HEIGHTS = [1, 2, 3, 31, 32, 33, 64, 127, 255, 256, 257, 400, 510, 511, 512, 513, 543, 544, 545, 991, 992, 993, 1023, 1024, 1025]
 SWEEP_COLUMNS = 8
 STUDENT_SCALE = 2
 STUDENT_STRIP_HEIGHT = 512
@@ -56,9 +57,11 @@ def round_trip(image: np.ndarray, benchmark_map: dict | None, legacy_strips: boo
     """Returns (chunk count, max pixel difference vs. the expected page)."""
     chunks = chunk_page(image, 0, benchmark_map, legacy_strips=legacy_strips, strip_height=strip_height)
     if not legacy_strips:
-        heights = {c.y_end - c.y_start for c in chunks}
+        heights = {c.page_slice.shape[0] for c in chunks}
         assert len(heights) == 1, f"smarter strips must share one height, got {sorted(heights)}"
-    stitched = reassemble([(upscale(c.page_slice), c) for c in chunks], scale)
+    if strip_height is not None:
+        assert heights == {strip_height}, f"fixed-shape strips must all be {strip_height} rows, got {sorted(heights)}"
+    stitched = reassemble([(crop_upscaled(upscale(c.page_slice), c, scale), c) for c in chunks], scale)
     expected = upscale(image)
     assert stitched.shape[0] == image.shape[0] * scale, f"{stitched.shape[0]} rows != {image.shape[0] * scale}"
     assert stitched.shape == expected.shape, f"shape {stitched.shape} != {expected.shape}"
@@ -107,11 +110,13 @@ print(f"Sweep: widths {SWEEP_WIDTHS}, heights {SWEEP_HEIGHTS.start}-{SWEEP_HEIGH
 rng = np.random.default_rng(1)
 # (label, legacy_strips, stand-in upscaler, scale, fixed strip height, benchmark map)
 SWEEPS = [(mode, legacy, fake_upscale_column, SCALE, None, benchmark_map) for legacy, mode in MODES]
-SWEEPS.append(("student", False, fake_upscale_column_2x, STUDENT_SCALE, STUDENT_STRIP_HEIGHT, None))
+SWEEPS.append(("hdfyer", False, fake_upscale_column_2x, STUDENT_SCALE, STUDENT_STRIP_HEIGHT, None))
 for mode, legacy_strips, upscale, scale, strip_height, sweep_map in SWEEPS:
+    # hdfyer also gets the short and boundary heights: padded pages, one strip, the anchored last strip.
+    heights = list(SWEEP_HEIGHTS) + (SHORT_HEIGHTS if strip_height is not None else [])
     for w in SWEEP_WIDTHS:
         failed, worst, most_chunks = 0, 0, 0
-        for h in SWEEP_HEIGHTS:
+        for h in heights:
             try:
                 n, diff = round_trip(sweep_page(rng, w, h), sweep_map, legacy_strips, upscale, scale, strip_height)
                 ok = diff <= 1
@@ -122,9 +127,9 @@ for mode, legacy_strips, upscale, scale, strip_height, sweep_map in SWEEPS:
                 ok = False
                 print(f"  FAIL {mode} {w}x{h}: {e}")
             failed += not ok
-        total += len(SWEEP_HEIGHTS)
+        total += len(heights)
         failures += failed
-        print(f"  {'OK  ' if not failed else 'FAIL'} {mode} strips, width {w}: {len(SWEEP_HEIGHTS) - failed}/{len(SWEEP_HEIGHTS)} heights, "
+        print(f"  {'OK  ' if not failed else 'FAIL'} {mode} strips, width {w}: {len(heights) - failed}/{len(heights)} heights, "
               f"up to {most_chunks} chunks, max diff {worst}")
 
 
@@ -227,8 +232,17 @@ def backend_checks(benchmark_map: dict) -> list[tuple[str, bool]]:
         for w, h in [(800, 300), (800, 512), (800, 1000), (800, 4540), (690, 3000), (1080, 9000)]:
             page = np.broadcast_to(np.zeros((h, 1, 3), np.uint8), (h, w, 3))
             shapes |= {c.page_slice.shape[:2] for c in chunk_page(page, 0, None, strip_height=STUDENT_STRIP_HEIGHT)}
-        checks.append(("student: planned strips are 512 rows except short and grown two-strip pages",
-                       shapes == {(300, 800), (512, 800), (516, 800), (512, 690), (512, 1080)}))
+        checks.append(("hdfyer: every planned strip is 512 rows, short and two-strip pages included",
+                       shapes == {(512, 800), (512, 690), (512, 1080)}))
+        chunks = chunk_page(np.broadcast_to(np.zeros((1000, 1, 3), np.uint8), (1000, 800, 3)), 0, None, strip_height=STUDENT_STRIP_HEIGHT)
+        checks.append(("hdfyer: the last strip is anchored to the page bottom and its extra overlap cropped",
+                       [(c.y_start, c.y_end, c.overlap_top, c.overlap_bottom, c.crop_top, c.crop_bottom) for c in chunks]
+                       == [(0, 512, 0, 32, 0, 0), (480, 992, 32, 32, 0, 0), (960, 1000, 32, 0, 472, 0)]))
+        chunks = chunk_page(np.broadcast_to(np.arange(300, dtype=np.uint8).reshape(300, 1, 1), (300, 800, 3)), 0, None, strip_height=STUDENT_STRIP_HEIGHT)
+        checks.append(("hdfyer: a short page is reflect-padded to one strip and cropped back",
+                       len(chunks) == 1 and chunks[0].page_slice.shape[:2] == (512, 800) and chunks[0].crop_bottom == 212
+                       and (chunks[0].y_start, chunks[0].y_end) == (0, 300)
+                       and chunks[0].page_slice[300:303, 0, 0].tolist() == [298 % 256, 297 % 256, 296 % 256]))
     finally:
         engine._runtime = saved_runtime
 
@@ -243,7 +257,7 @@ def backend_checks(benchmark_map: dict) -> list[tuple[str, bool]]:
     checks.append(("batching: a batch holds one shape and at most 8 strips",
                    all(len(b) <= 8 and len({c.page_slice.shape for c in b}) == 1 for b in batches)))
     checks.append(("batching: only the last batch of a shape is short",
-                   [len(b) for b in batches if b[0].page_slice.shape[:2] == (512, 800)] == [8, 8, 1]))
+                   [len(b) for b in batches if b[0].page_slice.shape[:2] == (512, 800)] == [8, 8, 5]))
     checks.append(("batching: strips of different pages share a batch",
                    any(len({c.page_id for c in b}) > 1 for b in batches)))
     checks.append(("batching: batch size 1 gives one strip per batch",
