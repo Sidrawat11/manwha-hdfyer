@@ -11,15 +11,20 @@ The forward pass has three runtimes, chosen once with select_backend():
 trt and compiled only handle each width's standard strip shape; every other shape runs
 eager, and so does any shape whose engine fails to build or run. Pre/post-processing is
 shared, so the output path is identical across backends.
+
+Every departure from the selected backend is a fallback event: it is logged when it
+happens (which pages, which strip shape, why) and kept for the end-of-run summary
+(fallback_events). Out-of-memory is retried with a smaller batch after the failed
+engine and buffers have been freed.
 """
 
 import copy
+import gc
 import numpy as np
 import torch
 import torch.nn.functional as F
 import cv2
 from tqdm import tqdm
-from core.model_loader import load_rrdbnet
 from pathlib import Path
 from inference import trt_backend
 from inference.chunker import ChunkMeta, crop_upscaled, get_strip_height
@@ -42,6 +47,9 @@ class _Runtime:
     strip_height = None  # fixed standard strip height (student); None = the benchmark map's (teacher)
     round_output = False   # round to uint8 instead of truncating (student)
     trt_batch = 1        # strips per TensorRT engine pass: an int, or a function of the padded (height, width)
+    batch_override = {}  # padded (h, w) -> engine batch, lowered after an out-of-memory
+    events = []          # fallback events, see fallback_events()
+    context = ""         # what is being processed (the chapter), for the fallback log
 
 
 _runtime = _Runtime()
@@ -105,9 +113,62 @@ def upscale(image: np.ndarray, model: torch.nn.Module, scale: int = 4) -> np.nda
     return img
 
 
-def _is_oom(error: RuntimeError) -> bool:
-    """True for PyTorch's OOM and for the driver's. With NVIDIA's "Prefer No Sysmem Fallback" it arrives as a plain CUDA RuntimeError."""
-    return isinstance(error, torch.cuda.OutOfMemoryError) or "out of memory" in str(error).lower()
+def _is_oom(error: Exception) -> bool:
+    """
+    True for PyTorch's OOM and for the driver's. With NVIDIA's "Prefer No Sysmem Fallback" it arrives as a plain CUDA RuntimeError.
+    Also true for the allocator's internal assert, which is what the first allocation after a driver OOM raises
+    (with expandable segments) if the cache was not emptied in between.
+    """
+    if isinstance(error, torch.cuda.OutOfMemoryError):
+        return True
+    message = str(error)
+    return "out of memory" in message.lower() or ("INTERNAL ASSERT FAILED" in message and "CUDACachingAllocator" in message)
+
+
+def _describe(error: Exception) -> str:
+    text = str(error).strip()
+    return f"{type(error).__name__}: {text.splitlines()[0]}" if text else type(error).__name__
+
+
+def free_gpu() -> None:
+    """Frees the live engine and every cached block. After an out-of-memory this must happen before the next allocation."""
+    if _runtime.trt is not None:
+        _runtime.trt.release()
+    gc.collect()
+    torch.cuda.empty_cache()
+
+
+def set_context(context: str) -> None:
+    """Names what is being processed (e.g. the chapter), so fallback events can say where they happened."""
+    _runtime.context = context
+
+
+def fallback_events() -> list[dict]:
+    """Every fallback since select_backend(): kind, context, pages, shape, reason."""
+    return list(_runtime.events)
+
+
+def _record(kind: str, reason: str, shape: tuple[int, int] | None = None, chunks: list[ChunkMeta] | None = None) -> None:
+    """Logs a fallback loudly, now, and keeps it for the end-of-run summary."""
+    pages = list(dict.fromkeys(chunk.page_name or f"page {chunk.page_id}" for chunk in chunks or []))
+    event = {"kind": kind, "context": _runtime.context, "pages": pages,
+             "shape": f"{shape[0]}x{shape[1]}" if shape else "", "reason": reason}
+    _runtime.events.append(event)
+    tqdm.write("!!! FALLBACK: " + format_event(event))
+
+
+def report_fallback(kind: str, reason: str) -> None:
+    """For callers that fall back before any strip exists (e.g. choosing the backend): logged and summarised like the rest."""
+    _record(kind, reason)
+
+
+def format_event(event: dict) -> str:
+    where = [event["context"]] if event["context"] else []
+    if event["pages"]:
+        where.append("pages " + ", ".join(event["pages"]))
+    if event["shape"]:
+        where.append(f"strips {event['shape']}")
+    return f"[{event['kind']}] " + (" | ".join(where) + ": " if where else "") + event["reason"]
 
 
 def _forward_batch(chunks: list[ChunkMeta], model: torch.nn.Module, scale: int, forward=None) -> list[tuple[np.ndarray, ChunkMeta]]:
@@ -166,20 +227,24 @@ def select_backend(requested: str, model: torch.nn.Module, model_path: Path, ben
     _runtime.strip_height = strip_height
     _runtime.round_output = round_output
     _runtime.trt_batch = trt_batch
+    _runtime.batch_override = {}
+    _runtime.events = []
     backend = resolve_backend(requested)
+    if requested != "auto" and backend != requested:
+        _record("backend unavailable", f"{requested} was requested but cannot run here; using {backend}")
 
     if backend == "trt":
         try:
             _runtime.trt = trt_backend.TrtBackend(model, model_path, arch=arch)
         except Exception as e:
-            tqdm.write(f"TensorRT could not start ({type(e).__name__}: {e}), falling back.")
             backend = resolve_backend("compiled")
+            _record("backend unavailable", f"TensorRT could not start ({_describe(e)}); using {backend}")
     if backend == "compiled":
         try:
             _runtime.compiled = torch.compile(copy.deepcopy(model).to(memory_format=torch.channels_last))
         except Exception as e:
-            tqdm.write(f"torch.compile could not start ({type(e).__name__}: {e}), falling back.")
             backend = "eager"
+            _record("backend unavailable", f"torch.compile could not start ({_describe(e)}); using eager")
 
     _runtime.backend = backend
     note = "" if requested in (backend, "auto") else f" ({requested} is not available)"
@@ -209,16 +274,32 @@ def _padded_shape(height: int, width: int, scale: int = SCALE) -> tuple[int, int
 
 
 def _engine_batch(height: int, width: int) -> int:
-    """Batch size of the TensorRT engine for a padded strip shape."""
+    """Batch size of the TensorRT engine for a padded strip shape: the configured one, unless an out-of-memory lowered it."""
+    if (height, width) in _runtime.batch_override:
+        return _runtime.batch_override[(height, width)]
     batch = _runtime.trt_batch
     return batch(height, width) if callable(batch) else batch
 
 
-def _fall_back(shape: tuple[int, int], error: Exception) -> None:
-    """Logs the failure once and sends this shape to eager for the rest of the run."""
+def _fall_back(shape: tuple[int, int], reason: str, chunks: list[ChunkMeta] | None = None) -> None:
+    """Sends this shape to eager for the rest of the run, and records why."""
     _runtime.failed_shapes.add(shape)
-    tqdm.write(f"{_runtime.backend} backend failed for {shape[0]}x{shape[1]} strips "
-               f"({type(error).__name__}: {error}). Using eager for this shape from now on.")
+    _record(f"{_runtime.backend} -> eager", f"{reason}. Eager for this shape for the rest of the run", shape, chunks)
+
+
+def _shrink_or_fall_back(shape: tuple[int, int], scale: int, reason: str, shrinkable: bool, chunks: list[ChunkMeta] | None = None) -> None:
+    """
+    After a TensorRT failure for a shape: frees the GPU, then either halves the engine batch (out-of-memory
+    or a failed build, while the batch is above 1) or gives the shape to eager.
+    """
+    free_gpu()
+    padded = _padded_shape(*shape, scale)
+    batch = _engine_batch(*padded)
+    if shrinkable and batch > 1:
+        _runtime.batch_override[padded] = batch // 2
+        _record("smaller batch", f"{reason}. Retrying with a TensorRT batch of {batch // 2} instead of {batch}", shape, chunks)
+    else:
+        _fall_back(shape, reason, chunks)
 
 
 def prepare_chapter(chunks: list[ChunkMeta], scale: int = SCALE) -> None:
@@ -228,24 +309,30 @@ def prepare_chapter(chunks: list[ChunkMeta], scale: int = SCALE) -> None:
     _runtime.trt.switches = 0
     _runtime.trt.load_seconds = []
 
-    for shape in dict.fromkeys(chunk.page_slice.shape[:2] for chunk in chunks):
-        if route(*shape) != "trt":
-            continue
-        height, width = _padded_shape(*shape, scale)
-        batch = _engine_batch(height, width)
-        if _runtime.trt.has_engine(height, width, batch):
-            continue
-        try:
-            _runtime.trt.build(height, width, batch)
-        except Exception as e:
-            _fall_back(shape, e)
+    by_shape = {}
+    for chunk in chunks:
+        by_shape.setdefault(chunk.page_slice.shape[:2], []).append(chunk)
+    for shape, shape_chunks in by_shape.items():
+        # A failed build is retried with half the batch until it works or the shape goes to eager.
+        while route(*shape) == "trt":
+            height, width = _padded_shape(*shape, scale)
+            batch = _engine_batch(height, width)
+            if _runtime.trt.has_engine(height, width, batch):
+                break
+            try:
+                _runtime.trt.build(height, width, batch)
+                break
+            except Exception as e:
+                reason = _describe(e)
+            _shrink_or_fall_back(shape, scale, reason, True, shape_chunks)
 
 
 def engine_stats() -> dict:
     """Engine switches and load times (deserialize + context creation) since the last prepare_chapter()."""
     if _runtime.trt is None:
-        return {"switches": 0, "load_seconds": []}
-    return {"switches": _runtime.trt.switches, "load_seconds": list(_runtime.trt.load_seconds)}
+        return {"switches": 0, "load_seconds": [], "build_seconds": []}
+    return {"switches": _runtime.trt.switches, "load_seconds": list(_runtime.trt.load_seconds),
+            "build_seconds": list(_runtime.trt.build_seconds)}
 
 
 def _forward_trt(chunks: list[ChunkMeta], scale: int) -> list[tuple[np.ndarray, ChunkMeta]]:
@@ -270,13 +357,15 @@ def _forward_compiled(x: torch.Tensor) -> torch.Tensor:
     return _runtime.compiled(x.contiguous(memory_format=torch.channels_last)).contiguous()
 
 
-def batch_upscale(chunks: list[ChunkMeta], model: torch.nn.Module, scale: int = 4) -> list[tuple[np.ndarray, ChunkMeta]]:
+def batch_upscale(chunks: list[ChunkMeta], model: torch.nn.Module, scale: int = 4, _last_chance: bool = False) -> list[tuple[np.ndarray, ChunkMeta]]:
     """
     Upscales a batch of same-shape chunks.
     Standard strips go to the selected backend (see route()); TensorRT takes them in groups of its engine's
     batch size, the others in a single forward pass. Preprocesses each chunk, runs the model, splits and postprocesses each result.
+    Any departure from the selected backend is recorded as a fallback event (see fallback_events()).
     If the backend raises, the shape falls back to eager for the rest of the run.
-    On out-of-memory the batch is split in half and each half retried; a batch of 1 that still fails re-raises.
+    On out-of-memory the failed engine and buffers are freed and the work is retried smaller: TensorRT with half
+    the engine batch, eager with the batch split in half. A batch of 1 is retried once on a clean cache, then re-raises.
     Returns paired upscaled arrays and their ChunkMetas.
     """
     shape = chunks[0].page_slice.shape[:2]
@@ -286,9 +375,15 @@ def batch_upscale(chunks: list[ChunkMeta], model: torch.nn.Module, scale: int = 
         try:
             return _forward_trt(chunks, scale)
         except Exception as e:
-            _fall_back(shape, e)
-        _runtime.trt.release()
-    elif _runtime.trt is not None:
+            reason = _describe(e)
+            shrinkable = _is_oom(e) or isinstance(e, trt_backend.EngineBuildError)
+        # Outside the except block, so the failed pass's tensors are no longer held by the traceback.
+        _shrink_or_fall_back(shape, scale, reason, shrinkable, chunks)
+        return batch_upscale(chunks, model, scale)
+
+    if backend == "eager" and _runtime.backend != "eager" and shape not in _runtime.failed_shapes:
+        _record(f"{_runtime.backend} -> eager", "not the standard strip shape, so there is no engine for it", shape, chunks)
+    if _runtime.trt is not None:
         # One runtime's activation memory at a time: an eager pass must not share VRAM with a live engine.
         _runtime.trt.release()
 
@@ -296,17 +391,21 @@ def batch_upscale(chunks: list[ChunkMeta], model: torch.nn.Module, scale: int = 
     try:
         return _forward_batch(chunks, model, scale, forward)
     except Exception as e:
-        out_of_memory = isinstance(e, RuntimeError) and _is_oom(e)
-        if out_of_memory and len(chunks) == 1:
+        out_of_memory = _is_oom(e)
+        reason = _describe(e)
+        if out_of_memory and len(chunks) == 1 and _last_chance:
             raise
-        if not out_of_memory:
-            if forward is None:
-                raise
-            _fall_back(shape, e)
+        if not out_of_memory and forward is None:
+            raise
 
     # Retry outside the except block, so the failed pass's tensors are no longer held by the traceback.
-    torch.cuda.empty_cache()
+    free_gpu()
     if not out_of_memory:
+        _fall_back(shape, reason, chunks)
         return batch_upscale(chunks, model, scale)
+    if len(chunks) == 1:
+        _record("out of memory", f"{reason}. Retrying this strip once on an emptied cache", shape, chunks)
+        return batch_upscale(chunks, model, scale, _last_chance=True)
     mid = len(chunks) // 2
+    _record("out of memory", f"{reason}. Retrying {len(chunks)} strips as batches of {mid} and {len(chunks) - mid}", shape, chunks)
     return batch_upscale(chunks[:mid], model, scale) + batch_upscale(chunks[mid:], model, scale)

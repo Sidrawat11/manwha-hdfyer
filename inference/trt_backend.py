@@ -23,6 +23,10 @@ ONNX_OPSET = 17
 HASH_LENGTH = 12
 
 
+class EngineBuildError(RuntimeError):
+    """An engine could not be built (export, parse or TensorRT build failed, often for lack of VRAM)."""
+
+
 def is_available() -> bool:
     """True if tensorrt can be imported."""
     try:
@@ -108,6 +112,7 @@ class TrtBackend:
         torch.cuda.empty_cache()
 
         onnx_path = plan_path.with_suffix(".onnx")
+        failure = None
         try:
             # FP16 lives in the ONNX file itself: strongly typed networks take their precision from it.
             fp16_model = copy.deepcopy(self._model).half().eval()
@@ -136,10 +141,16 @@ class TrtBackend:
             part_path.write_bytes(bytes(serialized))
             part_path.replace(plan_path)
             del builder, network, parser, config, serialized
+        except Exception as e:
+            failure = f"{type(e).__name__}: {str(e).splitlines()[0] if str(e) else ''}"
         finally:
             onnx_path.unlink(missing_ok=True)
-            gc.collect()
-            torch.cuda.empty_cache()
+
+        # Outside the except block, so the failed attempt's tensors are no longer held by the traceback.
+        gc.collect()
+        torch.cuda.empty_cache()
+        if failure is not None:
+            raise EngineBuildError(f"engine build for {height}x{width}{batch_note} failed ({failure})")
 
         elapsed = time.perf_counter() - start
         self.build_seconds.append(elapsed)

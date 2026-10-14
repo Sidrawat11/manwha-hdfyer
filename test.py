@@ -15,6 +15,7 @@ overlapped and the serial path and compare the two CBZs.
 Usage: python test.py [path/to/chapter.cbz]   (defaults to the first CBZ in Manwhas/)
 """
 
+import json
 import sys
 import tempfile
 import threading
@@ -28,8 +29,9 @@ from core import extractor
 from core.model_loader import fold_reparam
 from profiler.cache import load_cache
 from inference import engine, trt_backend
-from inference.chunker import chunk_page, crop_upscaled, get_strip_height
-from inference.batcher import build_batches, vram_batch_size
+from inference.chunker import ChunkMeta, chunk_page, crop_upscaled, get_strip_height
+from inference.batcher import build_batches
+from profiler import hdfyer as hdfyer_profile
 from pipeline.reassembler import reassemble
 from pipeline import finisher as finisher_module
 from pipeline.finisher import PageFinisher
@@ -131,6 +133,196 @@ for mode, legacy_strips, upscale, scale, strip_height, sweep_map in SWEEPS:
         failures += failed
         print(f"  {'OK  ' if not failed else 'FAIL'} {mode} strips, width {w}: {len(heights) - failed}/{len(heights)} heights, "
               f"up to {most_chunks} chunks, max diff {worst}")
+
+
+class FakeOutOfMemory:
+    """A 2x nearest-neighbour stand-in for the model that raises out-of-memory the way the GPU does."""
+
+    def __init__(self, largest_batch: int = 99, message: str = "CUDA out of memory. Tried to allocate 4.39 GiB", fail_first: int = 0):
+        self.largest_batch, self.message, self.fail_first = largest_batch, message, fail_first
+        self.calls = []
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        self.calls.append(x.shape[0])
+        if x.shape[0] > self.largest_batch or len(self.calls) <= self.fail_first:
+            raise RuntimeError(self.message)
+        return torch.nn.functional.interpolate(x, scale_factor=STUDENT_SCALE, mode="nearest")
+
+
+class FakeTrt:
+    """Stands in for trt_backend.TrtBackend: engines of a fixed batch that can fail to build or run."""
+
+    def __init__(self, run_model, largest_build: int = 99, build_message: str = "CUDA driver error: out of memory"):
+        self.run_model, self.largest_build, self.build_message = run_model, largest_build, build_message
+        self.built, self.released = [], 0
+        self.switches, self.load_seconds, self.build_seconds = 0, [], []
+
+    def has_engine(self, height, width, batch=1):
+        return (height, width, batch) in self.built
+
+    def build(self, height, width, batch=1):
+        if batch > self.largest_build:
+            raise trt_backend.EngineBuildError(f"engine build for {height}x{width} (batch {batch}) failed ({self.build_message})")
+        self.built.append((height, width, batch))
+
+    def release(self):
+        self.released += 1
+
+    def run(self, x):
+        batch, _, height, width = x.shape
+        if not self.has_engine(height, width, batch):
+            self.build(height, width, batch)
+        return self.run_model(x)
+
+
+def profile_checks() -> list[tuple[str, bool]]:
+    """hdfyer's batch profile: which batch is chosen, and that it is measured once and then read from the cache."""
+    checks = []
+    pick = hdfyer_profile.pick_best_batch
+    checks.append(("profile: equal time per strip picks the smallest batch", pick({1: 17.6, 2: 17.7, 4: 17.5, 8: 17.8}) == 1))
+    checks.append(("profile: a clearly faster batch is picked", pick({1: 20.0, 2: 15.0, 4: 12.0, 8: 11.9}) == 4))
+    checks.append(("profile: a gain under 3% does not justify a bigger batch", pick({1: 10.0, 2: 9.8}) == 1 and pick({1: 10.0, 2: 9.6}) == 2))
+    checks.append(("profile: a single measurement is its own best", pick({1: 58.0}) == 1))
+
+    saved = (hdfyer_profile.cache.load_section, hdfyer_profile.cache.save_section, hdfyer_profile.profile_width)
+    stored, measured, freed = {}, [], []
+
+    def fake_profile_width(model, width, strip_height, vram_mb=None):
+        measured.append(width)
+        return {"best_batch": 4 if width >= 1000 else 2, "batches": {"1": {"ms_per_strip": 9.0, "peak_vram_mb": 100}}, "stopped": "test"}
+
+    hdfyer_profile.cache.load_section = lambda key: dict(stored.get(key, {}))
+    hdfyer_profile.cache.save_section = lambda key, section: stored.__setitem__(key, json.loads(json.dumps(section)))
+    hdfyer_profile.profile_width = fake_profile_width
+    try:
+        profile = hdfyer_profile.BatchProfile(None, "weights-a", 512, before_measuring=lambda: freed.append(1))
+        first = [profile(512, 800), profile(512, 800), profile(512, 1080), profile(512, 691), profile(512, 692)]
+        checks.append(("profile: a width is measured once, then answered from the profile",
+                       first == [2, 2, 4, 2, 2] and measured == [800, 1080, 692]))
+        checks.append(("profile: the GPU is freed before each measurement", len(freed) == 3))
+        checks.append(("profile: results are saved under the GPU's hdfyer section",
+                       sorted(stored["hdfyer"]["widths"]) == ["1080", "692", "800"] and stored["hdfyer"]["weights"] == "weights-a"))
+
+        measured.clear()
+        again = hdfyer_profile.BatchProfile(None, "weights-a", 512)
+        checks.append(("profile: a later run reads the saved profile without measuring",
+                       [again(512, 800), again(512, 1080)] == [2, 4] and measured == []))
+        other = hdfyer_profile.BatchProfile(None, "weights-b", 512)
+        checks.append(("profile: other weights do not reuse the profile", other(512, 800) == 2 and measured == [800]))
+    finally:
+        hdfyer_profile.cache.load_section, hdfyer_profile.cache.save_section, hdfyer_profile.profile_width = saved
+    return checks
+
+
+def recovery_checks() -> list[tuple[str, bool]]:
+    """Out-of-memory and engine failures must be logged, retried smaller, and still produce the page. Runs on the CPU."""
+    checks = []
+    strip, batch = 64, 8
+    image = np.random.default_rng(3).integers(0, 256, (300, 40, 3), dtype=np.uint8)
+    expected = fake_upscale(image, STUDENT_SCALE)
+    ALLOCATOR_ASSERT = '!handles_.at(i) INTERNAL ASSERT FAILED at "/pytorch/c10/cuda/CUDACachingAllocator.cpp":419, please report a bug to PyTorch.'
+
+    def same(page, reference):
+        # blending identical overlaps can round down by 1
+        return page.shape == reference.shape and int(np.abs(page.astype(int) - reference.astype(int)).max()) <= 1
+
+    def run_page(backend, model, fake_trt=None, page=image):
+        """One page through chunk_page -> build_batches -> batch_upscale -> reassemble. Returns (page, events)."""
+        runtime = engine._Runtime()
+        runtime.backend, runtime.strip_height, runtime.round_output = backend, strip, True
+        runtime.failed_shapes, runtime.batch_override, runtime.events = set(), {}, []
+        runtime.trt, runtime.trt_batch, runtime.context = fake_trt, batch, "Chapter 1"
+        engine._runtime = runtime
+        chunks = chunk_page(page, 0, None, strip_height=strip)
+        for chunk in chunks:
+            chunk.page_name = "007.jpg"
+        engine.prepare_chapter(chunks, STUDENT_SCALE)
+        done = []
+        for group in build_batches(chunks, None, batch):
+            done.extend(engine.batch_upscale(group, model, STUDENT_SCALE))
+        done.sort(key=lambda pair: pair[1].chunk_index)
+        return reassemble(done, STUDENT_SCALE), engine.fallback_events()
+
+    saved_runtime, saved_device = engine._runtime, engine.DEVICE
+    engine.DEVICE = torch.device("cpu")
+    try:
+        page, events = run_page("eager", FakeOutOfMemory())
+        checks.append(("recovery: a clean run gives the page and no fallback events",
+                       same(page, expected) and events == []))
+
+        model = FakeOutOfMemory(largest_batch=2)
+        page, events = run_page("eager", model)
+        checks.append(("recovery: eager out-of-memory is retried in smaller batches and the page still comes out",
+                       same(page, expected) and max(model.calls) == 8 and model.calls.count(8) == 1
+                       and {e["kind"] for e in events} == {"out of memory"}))
+        checks.append(("recovery: the event names the chapter, the page, the strip shape and the reason",
+                       bool(events) and events[0]["context"] == "Chapter 1" and events[0]["pages"] == ["007.jpg"]
+                       and events[0]["shape"] == "64x40" and "out of memory" in events[0]["reason"]))
+
+        model = FakeOutOfMemory(message=ALLOCATOR_ASSERT, fail_first=1)
+        page, events = run_page("eager", model, page=image[:64])
+        checks.append(("recovery: the allocator's internal assert is treated as out-of-memory and a single strip is retried once",
+                       same(page, expected[:128]) and model.calls == [1, 1] and len(events) == 1))
+
+        try:
+            run_page("eager", FakeOutOfMemory(largest_batch=0), page=image[:64])
+            raised = False
+        except RuntimeError as e:
+            raised = "out of memory" in str(e)
+        checks.append(("recovery: a single strip that never fits still raises", raised))
+
+        try:
+            run_page("eager", FakeOutOfMemory(largest_batch=0, message="shape mismatch"))
+            raised = False
+        except RuntimeError as e:
+            raised = "shape mismatch" in str(e)
+        checks.append(("recovery: an eager error that is not out-of-memory is not swallowed", raised))
+
+        eager = FakeOutOfMemory()
+        trt = FakeTrt(FakeOutOfMemory(largest_batch=2))
+        page, events = run_page("trt", eager, trt)
+        checks.append(("recovery: TensorRT out-of-memory halves the engine batch until it fits, and the page still comes out",
+                       same(page, expected) and [b for _, _, b in trt.built] == [8, 4, 2] and eager.calls == []
+                       and [e["kind"] for e in events] == ["smaller batch", "smaller batch"] and trt.released >= 2))
+
+        trt = FakeTrt(FakeOutOfMemory(), largest_build=2)
+        page, events = run_page("trt", eager, trt)
+        checks.append(("recovery: a failed engine build is retried with a smaller batch before the chapter starts",
+                       same(page, expected) and [b for _, _, b in trt.built] == [2] and eager.calls == []
+                       and [e["kind"] for e in events] == ["smaller batch", "smaller batch"]))
+
+        eager = FakeOutOfMemory()
+        trt = FakeTrt(FakeOutOfMemory(), largest_build=0)
+        page, events = run_page("trt", eager, trt)
+        checks.append(("recovery: when no engine can be built the shape goes to eager, loudly, and the page still comes out",
+                       same(page, expected) and trt.built == [] and eager.calls != []
+                       and [e["kind"] for e in events] == ["smaller batch"] * 3 + ["trt -> eager"]
+                       and engine._runtime.failed_shapes == {(64, 40)}))
+
+        eager = FakeOutOfMemory()
+        trt = FakeTrt(FakeOutOfMemory(largest_batch=0, message="TensorRT execution failed"))
+        page, events = run_page("trt", eager, trt)
+        checks.append(("recovery: a TensorRT error that is not out-of-memory goes straight to eager and is logged once",
+                       same(page, expected) and [e["kind"] for e in events] == ["trt -> eager"]
+                       and "TensorRT execution failed" in events[0]["reason"] and events[0]["pages"] == ["007.jpg"]))
+
+        # A strip that is not the standard shape has no engine: it runs eager and that is reported, every time.
+        runtime = engine._Runtime()
+        runtime.backend, runtime.strip_height, runtime.round_output = "trt", strip, True
+        runtime.failed_shapes, runtime.batch_override, runtime.events = set(), {}, []
+        runtime.trt, runtime.trt_batch = FakeTrt(FakeOutOfMemory()), 1
+        engine._runtime = runtime
+        odd = ChunkMeta(4, image[:50], 0, 1, 0, 50, 0, 0, page_name="credits.png")
+        out = engine.batch_upscale([odd], FakeOutOfMemory(), STUDENT_SCALE)
+        events = engine.fallback_events()
+        checks.append(("recovery: an odd-shaped strip runs eager and is reported with its page",
+                       np.array_equal(out[0][0], expected[:100]) and len(events) == 1 and events[0]["kind"] == "trt -> eager"
+                       and events[0]["pages"] == ["credits.png"] and events[0]["shape"] == "50x40"))
+        checks.append(("recovery: an event formats as one readable line",
+                       engine.format_event(events[0]).startswith("[trt -> eager] pages credits.png | strips 50x40: ")))
+    finally:
+        engine._runtime, engine.DEVICE = saved_runtime, saved_device
+    return checks
 
 
 def backend_checks(benchmark_map: dict) -> list[tuple[str, bool]]:
@@ -263,27 +455,28 @@ def backend_checks(benchmark_map: dict) -> list[tuple[str, bool]]:
     checks.append(("batching: batch size 1 gives one strip per batch",
                    all(len(b) == 1 for b in build_batches(chunks, None, batch_size=1))))
 
-    GB = 1024 ** 3
-    sizes = {w: vram_batch_size(512, w, 8, 2410, 8 * GB) for w in (690, 800, 1080, 1500, 3200)}
-    checks.append(("batching: batch shrinks with width on an 8 GB card", sizes == {690: 7, 800: 6, 1080: 4, 1500: 3, 3200: 1}))
-    checks.append(("batching: batch is capped at the maximum on a big card",
-                   all(vram_batch_size(512, w, 8, 2410, 140 * GB) == 8 for w in (690, 800, 1500, 3200))))
-    checks.append(("batching: batch is never below 1", vram_batch_size(4096, 4096, 8, 2410, 1 * GB) == 1))
-    batches = build_batches(chunks, None, batch_size=lambda h, w: vram_batch_size(h, w, 8, 2410, 8 * GB))
+    batches = build_batches(chunks, None, batch_size=lambda h, w: 6 if w == 800 else 3)
     checks.append(("batching: a per-shape batch size is applied to each shape",
                    max(len(b) for b in batches if b[0].page_slice.shape[:2] == (512, 800)) == 6
-                   and max(len(b) for b in batches if b[0].page_slice.shape[:2] == (512, 690)) <= 7))
+                   and max(len(b) for b in batches if b[0].page_slice.shape[:2] == (512, 690)) == 3))
 
     saved_runtime = engine._runtime
     try:
         runtime = engine._Runtime()
+        runtime.batch_override = {}
         engine._runtime = runtime
         checks.append(("engine batch defaults to 1 (teacher)", engine._engine_batch(512, 800) == 1))
-        runtime.trt_batch = lambda h, w: vram_batch_size(h, w, 8, 2410, 8 * GB)
+        runtime.trt_batch = lambda h, w: 6 if w == 800 else 3
         checks.append(("engine batch follows the per-shape batch size", engine._engine_batch(512, 800) == 6
                        and engine._engine_batch(512, 1500) == 3))
+        runtime.batch_override[(512, 800)] = 2
+        checks.append(("engine batch lowered after an out-of-memory wins over the configured one",
+                       engine._engine_batch(512, 800) == 2 and engine._engine_batch(512, 1500) == 3))
     finally:
         engine._runtime = saved_runtime
+
+    checks += profile_checks()
+    checks += recovery_checks()
 
     # SPAN's convolutions must be folded once at load, not on every forward pass.
     class FakeConv3XC:
