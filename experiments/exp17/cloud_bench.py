@@ -18,7 +18,7 @@ import argparse, os, shlex, subprocess, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "exp16"))
 import cloud_run as cr  # sh, vast, write_cloud_info
 
-IMAGE = "pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime"   # base only; the laptop's torch 2.10 is installed on top
+IMAGE = "pytorch/pytorch:2.10.0-cuda12.8-cudnn9-runtime"  # same torch as the laptop: nothing big to install, no 2.5.1 shadowing
 REMOTE = "/workspace/m"
 WEIGHTS = "models/hdfyer/hdfyer-2x-s-r2.pth"
 BENCH_DIR = "bench_chapters"  # default --chapters-dir; gitignored: the benchmark chapters as <series>/<chapter>.cbz
@@ -32,9 +32,17 @@ def bench_chapters(chapters_dir=BENCH_DIR):
 
 
 # Same versions as the laptop (requirements.txt). cu128 wheels need a driver that supports CUDA 12.8.
-PIP = ("python -m pip install -q torch==2.10.0 --index-url https://download.pytorch.org/whl/cu128 && "
-       "python -m pip install -q spandrel==0.4.2 opencv-python-headless numpy imagesize tqdm "
+PIP = ("python -m pip install -q spandrel==0.4.2 opencv-python-headless numpy imagesize tqdm "
        "tensorrt-cu12==11.4.0.106 onnx==1.23.2 onnxscript")
+ENGINES = "cache/trt_engines"  # engine files are named by GPU model + TensorRT version + model hash: reusable across machines
+
+
+def engines_for(gpu_name):
+    """Local engine files built on this GPU model (e.g. 'H200 NVL' -> ..._nvidia-h200-nvl_trt...)."""
+    import re
+    slug = re.sub(r"[^a-z0-9]+", "-", (gpu_name or "").lower()).strip("-")
+    pat = re.compile(rf"_nvidia-(?:geforce-)?{re.escape(slug)}_trt")
+    return sorted(os.path.join(ENGINES, f) for f in os.listdir(ENGINES) if pat.search(f)) if slug and os.path.isdir(ENGINES) else []
 
 
 def find_offer(gpus, max_dph, disk, geo=""):
@@ -124,6 +132,11 @@ def main():
         subprocess.run(ssh_in + [f"tar xf - -C {REMOTE}"], stdin=git.stdout, check=True); git.wait()
         tar = subprocess.Popen(["tar", "cf", "-", WEIGHTS, "experiments/exp17/bench.py"], stdout=subprocess.PIPE)  # bench.py: working copy, may be uncommitted
         subprocess.run(ssh_in + [f"tar xf - -C {REMOTE}"], stdin=tar.stdout, check=True); tar.wait()
+        reuse = engines_for(offer.get("gpu_name"))
+        if reuse:  # engines from an earlier run on this GPU model: skips the one-time builds (new code's cache only)
+            tar_e = subprocess.Popen(["tar", "cf", "-", *reuse], stdout=subprocess.PIPE)
+            subprocess.run(ssh_in + [f"mkdir -p {REMOTE}/{ENGINES} && tar xf - -C {REMOTE}"], stdin=tar_e.stdout, check=True); tar_e.wait()
+            print(f"  reused {len(reuse)} TensorRT engines built on an earlier {offer.get('gpu_name')}", flush=True)
         if a.compare:  # the older commit in its own folder; shares only the weights (its engines may not be compatible)
             cr.sh(ssh + [f"mkdir -p {REMOTE}/base"])
             git_b = subprocess.Popen(["git", "archive", a.compare], stdout=subprocess.PIPE)
@@ -145,7 +158,7 @@ def main():
                          if a.compare else "") +  # old code first, so the new run's DONE marks the end of everything
                       f"PYTHONUNBUFFERED=1 python experiments/exp17/bench.py {' '.join(bench_args)} >> run.log 2>&1\" "
                       f"> /dev/null 2>&1 < /dev/null &")
-        print("  installing torch 2.10 + TensorRT 11.4 on the server (a few minutes)...", flush=True)
+        print("  installing TensorRT 11.4 + small packages on the server (torch 2.10 comes with the image)...", flush=True)
         try:
             subprocess.run(ssh + [remote_cmd], capture_output=True, text=True, timeout=60)
         except subprocess.TimeoutExpired:
@@ -186,6 +199,11 @@ def main():
                                        f"cd runs/{a.run} && tar cf - --exclude=tmp_results ."], stdout=subprocess.PIPE)
         subprocess.run(["tar", "xf", "-", "-C", local_out], stdin=pull.stdout, check=True); pull.wait()
         print(f"  downloaded to {local_out}", flush=True)
+        # keep this GPU model's engines for next time (gitignored; named by GPU, so they never clash with the laptop's)
+        os.makedirs(ENGINES, exist_ok=True)
+        pull_e = subprocess.Popen(ssh + [f"cd {REMOTE} && tar cf - {ENGINES} 2>/dev/null"], stdout=subprocess.PIPE)
+        subprocess.run(["tar", "xf", "-", "-C", "."], stdin=pull_e.stdout); pull_e.wait()
+        print(f"  saved {len(engines_for(offer.get('gpu_name')))} {offer.get('gpu_name')} engines to {ENGINES}/ for reuse", flush=True)
     except KeyboardInterrupt:
         print("\nInterrupted.", flush=True)
     finally:
