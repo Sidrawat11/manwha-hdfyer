@@ -26,7 +26,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 from pathlib import Path
 from hdfyer.digest import trt as trt_backend
-from hdfyer.digest.strips import ChunkMeta, crop_upscaled, get_strip_height
+from hdfyer.digest.strips import ChunkMeta, crop_upscaled
 
 DEVICE = torch.device('cuda')
 DTYPE = torch.float16
@@ -39,11 +39,10 @@ BACKEND = "auto"  # default for select_backend()
 class _Runtime:
     """What select_backend() chose. Until it is called everything runs eager."""
     backend = "eager"
-    benchmark_map = None
     trt = None           # trt_backend.TrtBackend
     compiled = None      # torch.compile'd channels_last copy of the model
     failed_shapes = set()   # (h, w) chunk shapes that fell back to eager for the rest of the run
-    strip_height = None  # fixed standard strip height (student); None = the benchmark map's (teacher)
+    strip_height = None  # the standard strip height; None: no shape is standard, everything runs eager
     round_output = False   # round to uint8 instead of truncating (student)
     trt_batch = 1        # strips per TensorRT engine pass: an int, or a function of the padded (height, width)
     batch_override = {}  # padded (h, w) -> engine batch, lowered after an out-of-memory
@@ -280,11 +279,11 @@ def resolve_backend(requested: str, trt_ok: bool | None = None, compile_ok: bool
     return "eager"
 
 
-def select_backend(requested: str, model: torch.nn.Module, model_path: Path, benchmark_map: dict | None,
+def select_backend(requested: str, model: torch.nn.Module, model_path: Path,
                    strip_height: int | None = None, round_output: bool = False, trt_batch: int = 1, arch: str = "rrdb") -> str:
     """
     Chooses the runtime for the rest of the run and prints it once. Returns the backend in use.
-    strip_height: the model's fixed standard strip height, if it doesn't use the benchmark map's.
+    strip_height: the standard strip height: strips of that height go to the selected backend.
     round_output: round the model's output to uint8 instead of truncating it.
     trt_batch: strips per TensorRT engine pass, an int or a function of the padded (height, width).
     arch: short model-family name for the engine file names.
@@ -292,7 +291,6 @@ def select_backend(requested: str, model: torch.nn.Module, model_path: Path, ben
     global _runtime
     _runtime = _Runtime()
     _runtime.failed_shapes = set()
-    _runtime.benchmark_map = benchmark_map
     _runtime.strip_height = strip_height
     _runtime.round_output = round_output
     _runtime.trt_batch = trt_batch
@@ -321,18 +319,16 @@ def select_backend(requested: str, model: torch.nn.Module, model_path: Path, ben
     return backend
 
 
-def is_standard_shape(height: int, width: int, benchmark_map: dict | None, strip_height: int | None = None) -> bool:
+def is_standard_shape(height: int, width: int, strip_height: int | None) -> bool:
     """True if a chunk of this size is its width's standard strip, the only shape worth an engine."""
-    if strip_height is not None:
-        return height == strip_height
-    return height == get_strip_height(width, benchmark_map)
+    return strip_height is not None and height == strip_height
 
 
 def route(height: int, width: int) -> str:
     """Which runtime a chunk of this size goes to: the selected backend for standard strips, eager for the rest."""
     if _runtime.backend == "eager" or (height, width) in _runtime.failed_shapes:
         return "eager"
-    if not is_standard_shape(height, width, _runtime.benchmark_map, _runtime.strip_height):
+    if not is_standard_shape(height, width, _runtime.strip_height):
         return "eager"
     return _runtime.backend
 

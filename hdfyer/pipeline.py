@@ -33,9 +33,6 @@ SCALE = 2
 STRIP_HEIGHT = 512   # input rows; every strip of every page is exactly this tall (see digest/strips.py)
 BATCH = "auto"       # strips per forward pass: "auto" reads the GPU's profile (digest/batch_profile.py), or a number
 
-# Teacher only. True restores the old strips: tallest strip that fits VRAM, 128-row overlap, short last strip.
-LEGACY_STRIPS = False
-
 # CPU finishing (sharpen, cleanup, encode) runs on threads while the GPU works on the next pages.
 CPU_WORKERS = min(4, os.cpu_count() or 1)
 MAX_INFLIGHT = 3   # stitched pages queued or being finished at once; a 2x page is ~45 MB (a teacher 4x page ~180 MB)
@@ -44,45 +41,11 @@ MAX_INFLIGHT = 3   # stitched pages queued or being finished at once; a 2x page 
 PARALLEL = 1
 
 
-def run_teacher_profiler():
-    """Profiles the teacher's VRAM use and writes its benchmark map. Experiments only: the production run never calls this."""
-    from hdfyer.digest.batch_profile import cache_check, save_cache
-    from profiler.scanner import scan_library
-    from profiler.runner import run_profiler
-    from profiler.benchmark import build_map, get_lookup
-    if cache_check():
-        print("Cache found, skipping profiling.")
-        return
-
-    library_dir = Path("Manwhas")
-    model_path = Path("models/4x-UltraSharp.pth")
-
-    print("Scanning library...")
-    unique_widths, max_height = scan_library(library_dir)
-    print(f"Widths found: {unique_widths}, Max height: {max_height}")
-
-    print("Running profiler...")
-    raw_results = run_profiler(unique_widths, max_height, model_path)
-
-    print("Building benchmark map...")
-    benchmark_map = build_map(raw_results)
-    save_cache(benchmark_map)
-    print("Cache saved.")
-
-    print("Test lookups:")
-    test_cases = [(720, 512), (720, 800), (720, 3200), (800, 1024)]
-    for w, h in test_cases:
-        result = get_lookup(w, h, benchmark_map)
-        print(f"  {w}x{h} -> {result}")
-
-
-def process_chapter_v2(cbz_path: Path, model: torch.nn.Module, benchmark_map: dict, output_path: Path, scale: int = 4, legacy_strips: bool = LEGACY_STRIPS,
+def process_chapter_v2(cbz_path: Path, model: torch.nn.Module, output_path: Path, scale: int = SCALE,
                        cpu_workers: int = CPU_WORKERS, max_inflight: int = MAX_INFLIGHT, overlap: bool = True,
-                       strip_height: int | None = None, batch_size=None, quiet: bool = False, pages=None):
+                       strip_height: int = STRIP_HEIGHT, batch_size=1, quiet: bool = False, pages=None):
     """
-    Upscales one chapter with whatever model the caller loaded. `scale` is that model's output scale (4 or 2);
-    the CBZ is 2x either way. hdfyer passes strip_height and batch_size (a number, or a function of strip height
-    and width) and no benchmark map; the defaults are the teacher's, for experiments.
+    Upscales one chapter with hdfyer into output_path. batch_size is a number, or a function of strip height and width.
     quiet drops the per-chapter progress output (--parallel workers); fallbacks are still printed.
     pages: the chapter's (name, image) list if it was already loaded (see prefetched); otherwise it is loaded here.
     """
@@ -97,13 +60,13 @@ def process_chapter_v2(cbz_path: Path, model: torch.nn.Module, benchmark_map: di
     log("Chunking pages...")
     all_chunks = []
     for page_id, image in enumerate(pages):
-        page_chunks = chunk_page(image, page_id, benchmark_map, legacy_strips=legacy_strips, strip_height=strip_height)
+        page_chunks = chunk_page(image, page_id, strip_height)
         for chunk in page_chunks:
             chunk.page_name = page_names[page_id]   # so a fallback can say which page it happened on
         all_chunks.extend(page_chunks)
     log(f"Total chunks: {len(all_chunks)}")
 
-    batches = build_batches(all_chunks, benchmark_map, batch_size)
+    batches = build_batches(all_chunks, batch_size)
     log(f"Total batches: {len(batches)}")
 
     # Builds any missing TensorRT engine now, so the one-time cost isn't hidden inside the progress bar.
@@ -161,7 +124,7 @@ def load_runtime(weights: Path, backend: str, batch: str | int, allow_build: boo
                 engine.report_fallback("no batch profile", f"{width} px wide pages were not profiled in the warm-up; using batch 1")
                 return 1
         batch_size = BatchProfile(model, weights_id, STRIP_HEIGHT, before_measuring=engine.free_gpu, on_missing=on_missing)
-    backend = select_backend(backend, model, weights, None, strip_height=STRIP_HEIGHT, round_output=True,
+    backend = select_backend(backend, model, weights, strip_height=STRIP_HEIGHT, round_output=True,
                              trt_batch=batch_size, arch="span")
     if engine._runtime.trt is not None:
         engine._runtime.trt.allow_build = allow_build
@@ -178,7 +141,7 @@ def process_chapter(cbz_path: Path, relative: Path, output_dir: Path, model, bat
     # Write to .part and rename on success, so an interrupted chapter isn't mistaken for a finished one on resume.
     chapter_start = time.perf_counter()
     part_path = output_path.with_name(output_path.name + ".part")
-    process_chapter_v2(cbz_path, model, None, part_path, SCALE, False, cpu_workers, max_inflight, overlap,
+    process_chapter_v2(cbz_path, model, part_path, SCALE, cpu_workers, max_inflight, overlap,
                        STRIP_HEIGHT, batch_size, quiet=quiet, pages=pages)
     part_path.replace(output_path)
     torch.cuda.empty_cache()
