@@ -1,11 +1,12 @@
-"""Chunk stitcher.
+"""Stitching: upscaled strips back into whole pages.
 
-Joins the upscaled chunks of one page back into a full page, linearly blending
-each overlap region to hide seams.
+PageBuffer collects each page's strips as they come back from the GPU and, when
+the last one arrives, reassemble() joins them, linearly blending each overlap
+region to hide seams.
 """
 
 import numpy as np
-from inference.chunker import ChunkMeta
+from hdfyer.digest.strips import ChunkMeta
 
 
 def _blend_overlap(top_region: np.ndarray, bottom_region: np.ndarray) -> np.ndarray:
@@ -52,3 +53,28 @@ def reassemble(chunks: list[tuple[np.ndarray, ChunkMeta]], scale: int = 4) -> np
     stitched = np.concatenate(pieces, axis=0)
     _check_height(stitched, expected_height, chunks)
     return stitched
+
+
+class PageBuffer:
+    def __init__(self, scale: int = 4):
+        self.scale = scale
+        self._pages: dict = {}
+
+    def add(self, upscaled: np.ndarray, meta: ChunkMeta) -> np.ndarray | None:
+        """Stores an upscaled chunk. Returns the reassembled page if all chunks have arrived, None otherwise."""
+        if meta.page_id not in self._pages:
+            self._pages[meta.page_id] = []
+
+        self._pages[meta.page_id].append((upscaled, meta))
+
+        if len(self._pages[meta.page_id]) == meta.total_chunks:
+            sorted_chunks = sorted(self._pages[meta.page_id], key=lambda x: x[1].chunk_index)
+            result = reassemble(sorted_chunks, self.scale)
+            del self._pages[meta.page_id]
+            return result
+
+        return None
+
+    def is_empty(self) -> bool:
+        """Returns True if all pages have been completed and cleared."""
+        return len(self._pages) == 0

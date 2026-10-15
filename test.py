@@ -26,19 +26,19 @@ import cv2
 import numpy as np
 from pathlib import Path
 import torch
-from core import extractor
-from core.model_loader import fold_reparam
-from profiler.cache import load_cache
-from inference import engine, trt_backend
-from inference.chunker import ChunkMeta, chunk_page, crop_upscaled, get_strip_height
-from inference.batcher import build_batches
-from profiler import hdfyer as hdfyer_profile
-from pipeline.reassembler import reassemble
-from pipeline import finisher as finisher_module
-from pipeline.finisher import PageFinisher
-from core.packager import Packager
-from postprocessing.sharpen import sharpen
-from postprocessing.cleanup import cleanup_near_black
+from hdfyer.ingest import reader as extractor
+from hdfyer.digest.model import fold_reparam
+from hdfyer.digest.batch_profile import load_cache
+from hdfyer.digest import engine, trt as trt_backend
+from hdfyer.digest.strips import ChunkMeta, chunk_page, crop_upscaled, get_strip_height
+from hdfyer.digest.batches import build_batches
+from hdfyer.digest import batch_profile as hdfyer_profile
+from hdfyer.digest.stitch import reassemble
+from hdfyer.render import finish as finisher_module
+from hdfyer.render.finish import PageFinisher
+from hdfyer.render.package import Packager
+from hdfyer.render.finish import sharpen
+from hdfyer.render.finish import cleanup_near_black
 
 SCALE = 4
 MODES = [(False, "smarter"), (True, "legacy")]
@@ -185,15 +185,15 @@ def profile_checks() -> list[tuple[str, bool]]:
     checks.append(("profile: a gain under 3% does not justify a bigger batch", pick({1: 10.0, 2: 9.8}) == 1 and pick({1: 10.0, 2: 9.6}) == 2))
     checks.append(("profile: a single measurement is its own best", pick({1: 58.0}) == 1))
 
-    saved = (hdfyer_profile.cache.load_section, hdfyer_profile.cache.save_section, hdfyer_profile.profile_width)
+    saved = (hdfyer_profile.load_section, hdfyer_profile.save_section, hdfyer_profile.profile_width)
     stored, measured, freed = {}, [], []
 
     def fake_profile_width(model, width, strip_height, vram_mb=None):
         measured.append(width)
         return {"best_batch": 4 if width >= 1000 else 2, "batches": {"1": {"ms_per_strip": 9.0, "peak_vram_mb": 100}}, "stopped": "test"}
 
-    hdfyer_profile.cache.load_section = lambda key: dict(stored.get(key, {}))
-    hdfyer_profile.cache.save_section = lambda key, section: stored.__setitem__(key, json.loads(json.dumps(section)))
+    hdfyer_profile.load_section = lambda key: dict(stored.get(key, {}))
+    hdfyer_profile.save_section = lambda key, section: stored.__setitem__(key, json.loads(json.dumps(section)))
     hdfyer_profile.profile_width = fake_profile_width
     try:
         profile = hdfyer_profile.BatchProfile(None, "weights-a", 512, before_measuring=lambda: freed.append(1))
@@ -211,14 +211,15 @@ def profile_checks() -> list[tuple[str, bool]]:
         other = hdfyer_profile.BatchProfile(None, "weights-b", 512)
         checks.append(("profile: other weights do not reuse the profile", other(512, 800) == 2 and measured == [800]))
     finally:
-        hdfyer_profile.cache.load_section, hdfyer_profile.cache.save_section, hdfyer_profile.profile_width = saved
+        hdfyer_profile.load_section, hdfyer_profile.save_section, hdfyer_profile.profile_width = saved
     return checks
 
 
 def parallel_checks() -> list[tuple[str, bool]]:
     """--parallel plumbing that needs no GPU: the warm-up sees the same pages as the workers, resume, state hand-over."""
-    import main
-    from core import extractor
+    from hdfyer import parallel
+    from hdfyer.ingest import library, reader
+    from hdfyer.ingest import reader as extractor
     checks = []
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
@@ -241,7 +242,7 @@ def parallel_checks() -> list[tuple[str, bool]]:
         out.mkdir(parents=True)
         (out / "ch1.cbz").write_bytes(b"finished")
         (out / "ch2.cbz.part").write_bytes(b"interrupted")
-        todo = [str(relative) for _, relative in main.todo_chapters(tmp / "lib", tmp / "out")]
+        todo = [str(relative) for _, relative in library.todo_chapters(tmp / "lib", tmp / "out")]
         checks.append(("parallel: finished chapters are skipped and an interrupted .part is redone",
                        todo == ["series/ch2.cbz", "series/ch3.cbz"]))
 
@@ -252,7 +253,7 @@ def parallel_checks() -> list[tuple[str, bool]]:
                                zip(decoded_in_threads, [(n, i, i) for n, i, _ in extractor.extract_images(cbz)]))))
 
     # Prefetch: chapters come back in order, the next one is loaded while the caller works, never more than one ahead.
-    saved_load = main.extractor.load_chapter
+    saved_load = reader.load_chapter
     loaded, in_flight, most = [], [0], [0]
     lock = threading.Lock()
 
@@ -268,10 +269,10 @@ def parallel_checks() -> list[tuple[str, bool]]:
             raise ValueError("corrupt chapter")
         return [(f"{path}-page", path)]
 
-    main.extractor.load_chapter = slow_load
+    reader.load_chapter = slow_load
     try:
         order, ahead = [], []
-        for (path, _), pages in main.prefetched([(f"c{i}", None) for i in range(5)]):
+        for (path, _), pages in reader.prefetched([(f"c{i}", None) for i in range(5)]):
             time.sleep(0.1)   # "upscaling": the next chapter should load meanwhile
             order.append(pages[0][1])
             ahead.append(len(loaded) - len(order))
@@ -279,7 +280,7 @@ def parallel_checks() -> list[tuple[str, bool]]:
                        order == ["c0", "c1", "c2", "c3", "c4"] and ahead == [1, 1, 1, 1, 0] and most[0] == 1))
         got = []
         try:
-            for (path, _), pages in main.prefetched([("c0", None), ("bad", None), ("c2", None)]):
+            for (path, _), pages in reader.prefetched([("c0", None), ("bad", None), ("c2", None)]):
                 got.append(path)
             raised = False
         except ValueError:
@@ -287,23 +288,23 @@ def parallel_checks() -> list[tuple[str, bool]]:
         checks.append(("decode ahead: a chapter that fails to load raises when its turn comes, after the ones before it",
                        raised and got == ["c0"]))
     finally:
-        main.extractor.load_chapter = saved_load
+        reader.load_chapter = saved_load
 
     # Thread pools: a single process keeps its defaults; N processes each get max(1, cpu_count // N).
-    saved_threads = (torch.get_num_threads(), cv2.getNumThreads(), main._decode_threads)
+    saved_threads = (torch.get_num_threads(), cv2.getNumThreads(), reader.decode_threads)
     try:
-        one = main.configure_threads(1)
-        unchanged = (torch.get_num_threads(), cv2.getNumThreads(), main._decode_threads) == saved_threads
-        many = main.configure_threads(10 ** 6)
+        one = parallel.configure_threads(1)
+        unchanged = (torch.get_num_threads(), cv2.getNumThreads(), reader.decode_threads) == saved_threads
+        many = parallel.configure_threads(10 ** 6)
         share = (os.cpu_count() or 1) // 4
-        torch.set_num_threads(saved_threads[0]); cv2.setNumThreads(saved_threads[1]); main._decode_threads = saved_threads[2]
-        four = main.configure_threads(4)
+        torch.set_num_threads(saved_threads[0]); cv2.setNumThreads(saved_threads[1]); reader.decode_threads = saved_threads[2]
+        four = parallel.configure_threads(4)
         checks.append(("threads: --parallel 1 keeps torch, OpenCV and decode threads as they were", unchanged and one["share"] == (os.cpu_count() or 1)))
         checks.append(("threads: N processes each get at most cpu_count // N, and never less than 1",
                        many == {"share": 1, "torch": 1, "opencv": 1, "decode": 1}
-                       and four["torch"] <= max(1, share) and four["opencv"] <= max(1, share) and four["decode"] <= main.DECODE_THREADS))
+                       and four["torch"] <= max(1, share) and four["opencv"] <= max(1, share) and four["decode"] <= reader.DECODE_THREADS))
     finally:
-        torch.set_num_threads(saved_threads[0]); cv2.setNumThreads(saved_threads[1]); main._decode_threads = saved_threads[2]
+        torch.set_num_threads(saved_threads[0]); cv2.setNumThreads(saved_threads[1]); reader.decode_threads = saved_threads[2]
 
     saved_runtime = engine._runtime
     try:
@@ -317,16 +318,16 @@ def parallel_checks() -> list[tuple[str, bool]]:
     finally:
         engine._runtime = saved_runtime
 
-    saved = (hdfyer_profile.cache.load_section, hdfyer_profile.profile_width)
+    saved = (hdfyer_profile.load_section, hdfyer_profile.profile_width)
     measured = []
-    hdfyer_profile.cache.load_section = lambda key: {"weights": "w", "strip_height": 512, "widths": {"800": {"best_batch": 2}}}
+    hdfyer_profile.load_section = lambda key: {"weights": "w", "strip_height": 512, "widths": {"800": {"best_batch": 2}}}
     hdfyer_profile.profile_width = lambda *args, **kwargs: measured.append(args) or {"best_batch": 9}
     try:
         profile = hdfyer_profile.BatchProfile(None, "w", 512, on_missing=lambda width: 1)
         checks.append(("parallel: a worker never measures a missing width; it answers through on_missing",
                        profile(512, 800) == 2 and profile(512, 1500) == 1 and measured == []))
     finally:
-        hdfyer_profile.cache.load_section, hdfyer_profile.profile_width = saved
+        hdfyer_profile.load_section, hdfyer_profile.profile_width = saved
     return checks
 
 

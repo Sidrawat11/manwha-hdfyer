@@ -5,7 +5,7 @@ Handles FP16 casting, tensor pre/post processing, and exposes a clean upscale
 interface to the pipeline.
 
 The forward pass has three runtimes, chosen once with select_backend():
-  trt       TensorRT FP16 engines (inference/trt_backend.py), fixed batch size per engine
+  trt       TensorRT FP16 engines (digest/trt.py), fixed batch size per engine
   compiled  torch.compile on a channels_last copy of the model
   eager     plain PyTorch FP16
 trt and compiled only handle each width's standard strip shape; every other shape runs
@@ -25,8 +25,8 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 from pathlib import Path
-from inference import trt_backend
-from inference.chunker import ChunkMeta, crop_upscaled, get_strip_height
+from hdfyer.digest import trt as trt_backend
+from hdfyer.digest.strips import ChunkMeta, crop_upscaled, get_strip_height
 
 DEVICE = torch.device('cuda')
 DTYPE = torch.float16

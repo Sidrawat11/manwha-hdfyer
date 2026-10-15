@@ -8,7 +8,7 @@ import json, subprocess, sys, time
 
 REMOTE = "/workspace/m"
 PROBE = f"""cd {REMOTE} 2>/dev/null || {{ echo 'phase: no files yet (still uploading?)'; exit; }}
-P=$(ps -eo etime,args | grep -E 'pip install|exp17/bench.py|exp16/distill.py|main.process_all' | grep -v grep | head -3 | cut -c1-110)
+P=$(ps -eo etime,args | grep -E 'pip install|exp17/bench.py|exp16/distill.py|process_all' | grep -v grep | head -3 | cut -c1-110)
 if echo "$P" | grep -q 'pip install'; then echo 'phase: INSTALLING packages'
 elif echo "$P" | grep -qE 'bench.py|distill.py'; then echo 'phase: RUNNING'
 elif ls runs/*/DONE >/dev/null 2>&1; then echo 'phase: FINISHED (waiting for download + destroy)'

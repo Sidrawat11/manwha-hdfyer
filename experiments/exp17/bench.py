@@ -1,6 +1,6 @@
 """Exp 17: how fast is the shipped pipeline on a given GPU? Runs anywhere: the laptop or a rented H200.
 
-Drives main.process_all exactly as production does (hdfyer, TensorRT, CPU overlap), each config in a fresh
+Drives hdfyer.pipeline.process_all exactly as production does (hdfyer, TensorRT, CPU overlap), each config in a fresh
 process, on a fixed 3-chapter set covering 3 page widths. Every config runs twice: the first run pays for
 engine builds and the batch profile (reported separately), the second is the timed one.
 
@@ -23,14 +23,17 @@ import argparse, json, os, re, shutil, subprocess, sys, time
 RUN = """
 import sys, time; sys.path.insert(0, '.')
 from pathlib import Path
-import main
+try:
+    from hdfyer.pipeline import process_all   # the hdfyer/ package layout
+except ImportError:
+    from main import process_all              # --code-dir on a commit from before it (tag pre-restructure)
 t = time.perf_counter()
-main.process_all(Path({inp!r}), Path({outp!r}), backend={backend!r}, batch={batch!r},
-                 cpu_workers={workers}, max_inflight={inflight}, overlap=True, parallel={parallel})
+process_all(Path({inp!r}), Path({outp!r}), backend={backend!r}, batch={batch!r},
+            cpu_workers={workers}, max_inflight={inflight}, overlap=True, parallel={parallel})
 """
 
 
-CODE_DIR = "."  # --code-dir: the checkout whose main.py is benchmarked (paths below are made absolute)
+CODE_DIR = "."  # --code-dir: the checkout whose pipeline is benchmarked (paths below are made absolute)
 
 
 def run(name, chapters, out, backend, batch, workers, parallel=1):

@@ -12,9 +12,24 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 import cv2
 import numpy as np
-from core.packager import Packager
-from postprocessing.sharpen import sharpen
-from postprocessing.cleanup import cleanup_near_black
+from hdfyer.render.package import Packager
+
+
+def sharpen(image: np.ndarray, strength: float = 0.3, radius: float = 1.0) -> np.ndarray:
+    """Unsharp mask: GaussianBlur, then cv2.addWeighted to amplify the detail upscaling softened."""
+    if strength == 0:
+        return image
+    blurred = cv2.GaussianBlur(image, (0, 0), radius)
+    sharpened = cv2.addWeighted(image, 1 + strength, blurred, -strength, 0)
+    return np.clip(sharpened, 0, 255).astype(np.uint8)
+
+
+def cleanup_near_black(image: np.ndarray, threshold: int = 15) -> np.ndarray:
+    """Pixels whose channels are all below the threshold become pure black: removes patchiness in solid dark regions."""
+    mask = np.all(image < threshold, axis=2)
+    result = image.copy()
+    result[mask] = 0
+    return result
 
 
 SHARPEN_RADIUS = {4: 1.0, 2: 0.5}   # the same blur width on the final 2x page either way

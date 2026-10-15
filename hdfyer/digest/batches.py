@@ -1,11 +1,11 @@
 """Batch assembler.
 
-Collects tagged chunks from the chunker, groups them into VRAM-safe batches
+Collects tagged strips from strips.py, groups them into VRAM-safe batches
 using the benchmark map's max_safe_batch_size, and manages torch.stack/unstack
 with tag preservation for reassembly.
 """
 
-from inference.chunker import ChunkMeta
+from hdfyer.digest.strips import ChunkMeta
 from profiler.benchmark import get_lookup
 from collections import defaultdict
 from typing import Callable

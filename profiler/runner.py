@@ -7,7 +7,7 @@ and records peak VRAM and timing data.
 from pathlib import Path
 import torch
 import time
-from core.model_loader import load_rrdbnet
+from hdfyer.digest.model import load_rrdbnet
 import torch.backends.cudnn as cudnn
 import math
 cudnn.benchmark = True
