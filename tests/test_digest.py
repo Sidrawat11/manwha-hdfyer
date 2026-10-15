@@ -1,17 +1,4 @@
-"""Chunk/reassemble round-trip test, no model inference.
-
-Cuts every page of a CBZ into hdfyer's fixed-shape strips (512 rows, anchored or padded),
-"upscales" each strip 2x with a nearest-neighbour resize, reassembles, and checks the result
-matches a nearest-neighbour resize of the full page. A synthetic sweep then covers widths
-690, 800 and 1080 at every page height from 130 to 9000 in steps of 7, plus short and
-boundary heights.
-
-Last come the inference-backend checks (engine cache key, backend selection, shape routing).
-They touch no GPU either. Finally the page-finishing checks run fake 4x pages through the
-overlapped and the serial path and compare the two CBZs.
-
-Usage: python test.py [path/to/chapter.cbz]   (defaults to the first CBZ in Manwhas/)
-"""
+"""digest: strips and stitching, engine routing and fallbacks, conversions, pinned buffers, batch profile, the model's fold."""
 
 import json
 import os
@@ -20,9 +7,9 @@ import tempfile
 import threading
 import time
 import zipfile
+from pathlib import Path
 import cv2
 import numpy as np
-from pathlib import Path
 import torch
 from hdfyer.ingest import reader as extractor
 from hdfyer.digest.model import fold_reparam
@@ -31,136 +18,53 @@ from hdfyer.digest.strips import ChunkMeta, chunk_page, crop_upscaled
 from hdfyer.digest.batches import build_batches
 from hdfyer.digest import batch_profile as hdfyer_profile
 from hdfyer.digest.stitch import reassemble
-from hdfyer.render import finish as finisher_module
-from hdfyer.render.finish import PageFinisher
-from hdfyer.render.package import Packager
-from hdfyer.render.finish import sharpen
-from hdfyer.render.finish import cleanup_near_black
-
-SCALE = 4
-SWEEP_WIDTHS = [690, 800, 1080]
-SWEEP_HEIGHTS = range(130, 9001, 7)
-SHORT_HEIGHTS = [1, 2, 3, 31, 32, 33, 64, 127, 255, 256, 257, 400, 510, 511, 512, 513, 543, 544, 545, 991, 992, 993, 1023, 1024, 1025]
-SWEEP_COLUMNS = 8
-STUDENT_SCALE = 2
-STUDENT_STRIP_HEIGHT = 512
+from tests.helpers import *
 
 
-def fake_upscale(image: np.ndarray, scale: int = SCALE) -> np.ndarray:
-    h, w = image.shape[:2]
-    return cv2.resize(image, (w * scale, h * scale), interpolation=cv2.INTER_NEAREST)
+def round_trip_checks(cbz_path: Path | None = None) -> list[tuple[str, bool]]:
+    """Strips + stitching: every real page of a CBZ, a synthetic page, and a sweep of page sizes come back pixel-exact."""
+    results = []
+    if cbz_path is None:
+        found = sorted(Path("Manwhas").rglob("*.cbz"))
+        cbz_path = found[0] if found else None
+    small = np.random.default_rng(0).integers(0, 256, (400, 300, 3), dtype=np.uint8)
+    cases = [("synthetic 300x400", small)]
+    if cbz_path is not None:
+        cases += [(name, image) for name, image, _ in extractor.extract_images(cbz_path)]
+    else:
+        print("  (no CBZ in Manwhas/: real-page cases skipped)")
 
-
-def round_trip(image: np.ndarray, upscale=fake_upscale, scale: int = SCALE, strip_height: int = 512) -> tuple[int, int]:
-    """Returns (chunk count, max pixel difference vs. the expected page)."""
-    chunks = chunk_page(image, 0, strip_height)
-    heights = {c.page_slice.shape[0] for c in chunks}
-    assert heights == {strip_height}, f"fixed-shape strips must all be {strip_height} rows, got {sorted(heights)}"
-    stitched = reassemble([(crop_upscaled(upscale(c.page_slice), c, scale), c) for c in chunks], scale)
-    expected = upscale(image)
-    assert stitched.shape[0] == image.shape[0] * scale, f"{stitched.shape[0]} rows != {image.shape[0] * scale}"
-    assert stitched.shape == expected.shape, f"shape {stitched.shape} != {expected.shape}"
-    return len(chunks), int(np.abs(stitched.astype(int) - expected.astype(int)).max())
-
-
-def fake_upscale_2x(image: np.ndarray) -> np.ndarray:
-    return fake_upscale(image, STUDENT_SCALE)
-
-
-def fake_upscale_column(image: np.ndarray, scale: int = SCALE) -> np.ndarray:
-    """fake_upscale on the first few columns only. Sweep pages are constant along x, so nothing is lost."""
-    return fake_upscale(np.ascontiguousarray(image[:, :SWEEP_COLUMNS]), scale)
-
-
-def fake_upscale_column_2x(image: np.ndarray) -> np.ndarray:
-    return fake_upscale_column(image, STUDENT_SCALE)
-
-
-def sweep_page(rng: np.random.Generator, w: int, h: int) -> np.ndarray:
-    """A w x h page of random rows, constant along x: chunking and stitching only act on rows, and this keeps the sweep fast."""
-    rows = rng.integers(0, 256, (h, 1, 3), dtype=np.uint8)
-    return np.broadcast_to(rows, (h, w, 3))
-
-
-cbz_path = Path(sys.argv[1]) if len(sys.argv) > 1 else sorted(Path("Manwhas").rglob("*.cbz"))[0]
-failures = 0
-total = 0
-
-small = np.random.default_rng(0).integers(0, 256, (400, 300, 3), dtype=np.uint8)
-cases = [("synthetic 300x400", small)]
-cases += [(name, image) for name, image, _ in extractor.extract_images(cbz_path)]
-
-print(f"Testing {len(cases) - 1} pages from {cbz_path}")
-for name, image in cases:
-    try:
-        n, diff = round_trip(image, fake_upscale_2x, STUDENT_SCALE, STUDENT_STRIP_HEIGHT)
-        ok = diff <= 1  # blending identical overlaps can round down by 1
-        print(f"  {'OK  ' if ok else 'FAIL'} {name}: {image.shape[1]}x{image.shape[0]}, {n} chunks, max diff {diff}")
-    except AssertionError as e:
-        ok = False
-        print(f"  FAIL {name}: {e}")
-    total += 1
-    failures += not ok
-
-print(f"Sweep: widths {SWEEP_WIDTHS}, heights {SWEEP_HEIGHTS.start}-{SWEEP_HEIGHTS[-1]} in steps of {SWEEP_HEIGHTS.step}, plus short and boundary heights")
-rng = np.random.default_rng(1)
-heights = list(SWEEP_HEIGHTS) + SHORT_HEIGHTS
-for w in SWEEP_WIDTHS:
-    failed, worst, most_chunks = 0, 0, 0
-    for h in heights:
+    print(f"  round trip: {len(cases) - 1} pages from {cbz_path}")
+    for name, image in cases:
         try:
-            n, diff = round_trip(sweep_page(rng, w, h), fake_upscale_column_2x, STUDENT_SCALE, STUDENT_STRIP_HEIGHT)
-            ok = diff <= 1
-            worst, most_chunks = max(worst, diff), max(most_chunks, n)
-            if not ok:
-                print(f"  FAIL hdfyer {w}x{h}: {n} chunks, max diff {diff}")
+            n, diff = round_trip(image, fake_upscale_2x, STUDENT_SCALE, STUDENT_STRIP_HEIGHT)
+            ok = diff <= 1  # blending identical overlaps can round down by 1
+            print(f"  {'OK  ' if ok else 'FAIL'} {name}: {image.shape[1]}x{image.shape[0]}, {n} chunks, max diff {diff}")
         except AssertionError as e:
             ok = False
-            print(f"  FAIL hdfyer {w}x{h}: {e}")
-        failed += not ok
-    total += len(heights)
-    failures += failed
-    print(f"  {'OK  ' if not failed else 'FAIL'} hdfyer strips, width {w}: {len(heights) - failed}/{len(heights)} heights, "
-          f"up to {most_chunks} chunks, max diff {worst}")
+            print(f"  FAIL {name}: {e}")
+        results.append((f"round trip: {name}", ok))
 
-class FakeOutOfMemory:
-    """A 2x nearest-neighbour stand-in for the model that raises out-of-memory the way the GPU does."""
-
-    def __init__(self, largest_batch: int = 99, message: str = "CUDA out of memory. Tried to allocate 4.39 GiB", fail_first: int = 0):
-        self.largest_batch, self.message, self.fail_first = largest_batch, message, fail_first
-        self.calls = []
-
-    def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        self.calls.append(x.shape[0])
-        if x.shape[0] > self.largest_batch or len(self.calls) <= self.fail_first:
-            raise RuntimeError(self.message)
-        return torch.nn.functional.interpolate(x, scale_factor=STUDENT_SCALE, mode="nearest")
-
-
-class FakeTrt:
-    """Stands in for trt_backend.TrtBackend: engines of a fixed batch that can fail to build or run."""
-
-    def __init__(self, run_model, largest_build: int = 99, build_message: str = "CUDA driver error: out of memory"):
-        self.run_model, self.largest_build, self.build_message = run_model, largest_build, build_message
-        self.built, self.released = [], 0
-        self.switches, self.load_seconds, self.build_seconds = 0, [], []
-
-    def has_engine(self, height, width, batch=1):
-        return (height, width, batch) in self.built
-
-    def build(self, height, width, batch=1):
-        if batch > self.largest_build:
-            raise trt_backend.EngineBuildError(f"engine build for {height}x{width} (batch {batch}) failed ({self.build_message})")
-        self.built.append((height, width, batch))
-
-    def release(self):
-        self.released += 1
-
-    def run(self, x):
-        batch, _, height, width = x.shape
-        if not self.has_engine(height, width, batch):
-            self.build(height, width, batch)
-        return self.run_model(x)
+    print(f"  sweep: widths {SWEEP_WIDTHS}, heights {SWEEP_HEIGHTS.start}-{SWEEP_HEIGHTS[-1]} in steps of {SWEEP_HEIGHTS.step}, plus short and boundary heights")
+    rng = np.random.default_rng(1)
+    heights = list(SWEEP_HEIGHTS) + SHORT_HEIGHTS
+    for w in SWEEP_WIDTHS:
+        failed, worst, most_chunks = 0, 0, 0
+        for h in heights:
+            try:
+                n, diff = round_trip(sweep_page(rng, w, h), fake_upscale_column_2x, STUDENT_SCALE, STUDENT_STRIP_HEIGHT)
+                ok = diff <= 1
+                worst, most_chunks = max(worst, diff), max(most_chunks, n)
+                if not ok:
+                    print(f"  FAIL hdfyer {w}x{h}: {n} chunks, max diff {diff}")
+            except AssertionError as e:
+                ok = False
+                print(f"  FAIL hdfyer {w}x{h}: {e}")
+            failed += not ok
+            results.append((f"round trip: {w}x{h} sweep page", ok))
+        print(f"  {'OK  ' if not failed else 'FAIL'} hdfyer strips, width {w}: {len(heights) - failed}/{len(heights)} heights, "
+              f"up to {most_chunks} chunks, max diff {worst}")
+    return results
 
 
 def profile_checks() -> list[tuple[str, bool]]:
@@ -199,122 +103,6 @@ def profile_checks() -> list[tuple[str, bool]]:
         checks.append(("profile: other weights do not reuse the profile", other(512, 800) == 2 and measured == [800]))
     finally:
         hdfyer_profile.load_section, hdfyer_profile.save_section, hdfyer_profile.profile_width = saved
-    return checks
-
-
-def parallel_checks() -> list[tuple[str, bool]]:
-    """--parallel plumbing that needs no GPU: the warm-up sees the same pages as the workers, resume, state hand-over."""
-    from hdfyer import parallel
-    from hdfyer.ingest import library, reader
-    from hdfyer.ingest import reader as extractor
-    checks = []
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp = Path(tmp)
-        cbz = tmp / "lib" / "series" / "ch1.cbz"
-        cbz.parent.mkdir(parents=True)
-        rng = np.random.default_rng(4)
-        with zipfile.ZipFile(cbz, "w") as z:
-            for name, (h, w) in [("002.jpg", (300, 690)), ("001.png", (40, 1080)), ("003.webp", (90, 800))]:
-                ok, data = cv2.imencode(Path(name).suffix, rng.integers(0, 256, (h, w, 3), dtype=np.uint8))
-                z.writestr(name, data.tobytes())
-            z.writestr("__MACOSX/._001.png", b"junk")
-            z.writestr("ComicInfo.xml", b"<x/>")
-        decoded = [(image.shape[1], image.shape[0]) for _, image, _ in extractor.extract_images(cbz)]
-        checks.append(("parallel: the warm-up's header scan sees exactly the pages the workers decode",
-                       extractor.page_sizes(cbz) == decoded == [(1080, 40), (690, 300), (800, 90)]))
-
-        (tmp / "lib" / "series" / "ch2.cbz").write_bytes(cbz.read_bytes())
-        (tmp / "lib" / "series" / "ch3.cbz").write_bytes(cbz.read_bytes())
-        out = tmp / "out" / "series"
-        out.mkdir(parents=True)
-        (out / "ch1.cbz").write_bytes(b"finished")
-        (out / "ch2.cbz.part").write_bytes(b"interrupted")
-        todo = [str(relative) for _, relative in library.todo_chapters(tmp / "lib", tmp / "out")]
-        checks.append(("parallel: finished chapters are skipped and an interrupted .part is redone",
-                       todo == ["series/ch2.cbz", "series/ch3.cbz"]))
-
-        decoded_in_threads = extractor.load_chapter(cbz, threads=3)
-        checks.append(("decode ahead: threaded decoding gives the same pages, in the same order",
-                       [n for n, _ in decoded_in_threads] == [n for n, _, _ in extractor.extract_images(cbz)]
-                       and all(np.array_equal(a, b) for (_, a), (_, _, b) in
-                               zip(decoded_in_threads, [(n, i, i) for n, i, _ in extractor.extract_images(cbz)]))))
-
-    # Prefetch: chapters come back in order, the next one is loaded while the caller works, never more than one ahead.
-    saved_load = reader.load_chapter
-    loaded, in_flight, most = [], [0], [0]
-    lock = threading.Lock()
-
-    def slow_load(path, threads):
-        with lock:
-            in_flight[0] += 1
-            most[0] = max(most[0], in_flight[0])
-        time.sleep(0.05)
-        loaded.append(path)
-        with lock:
-            in_flight[0] -= 1
-        if path == "bad":
-            raise ValueError("corrupt chapter")
-        return [(f"{path}-page", path)]
-
-    reader.load_chapter = slow_load
-    try:
-        order, ahead = [], []
-        for (path, _), pages in reader.prefetched([(f"c{i}", None) for i in range(5)]):
-            time.sleep(0.1)   # "upscaling": the next chapter should load meanwhile
-            order.append(pages[0][1])
-            ahead.append(len(loaded) - len(order))
-        checks.append(("decode ahead: chapters arrive in order, each loaded while the previous one is processed",
-                       order == ["c0", "c1", "c2", "c3", "c4"] and ahead == [1, 1, 1, 1, 0] and most[0] == 1))
-        got = []
-        try:
-            for (path, _), pages in reader.prefetched([("c0", None), ("bad", None), ("c2", None)]):
-                got.append(path)
-            raised = False
-        except ValueError:
-            raised = True
-        checks.append(("decode ahead: a chapter that fails to load raises when its turn comes, after the ones before it",
-                       raised and got == ["c0"]))
-    finally:
-        reader.load_chapter = saved_load
-
-    # Thread pools: a single process keeps its defaults; N processes each get max(1, cpu_count // N).
-    saved_threads = (torch.get_num_threads(), cv2.getNumThreads(), reader.decode_threads)
-    try:
-        one = parallel.configure_threads(1)
-        unchanged = (torch.get_num_threads(), cv2.getNumThreads(), reader.decode_threads) == saved_threads
-        many = parallel.configure_threads(10 ** 6)
-        share = (os.cpu_count() or 1) // 4
-        torch.set_num_threads(saved_threads[0]); cv2.setNumThreads(saved_threads[1]); reader.decode_threads = saved_threads[2]
-        four = parallel.configure_threads(4)
-        checks.append(("threads: --parallel 1 keeps torch, OpenCV and decode threads as they were", unchanged and one["share"] == (os.cpu_count() or 1)))
-        checks.append(("threads: N processes each get at most cpu_count // N, and never less than 1",
-                       many == {"share": 1, "torch": 1, "opencv": 1, "decode": 1}
-                       and four["torch"] <= max(1, share) and four["opencv"] <= max(1, share) and four["decode"] <= reader.DECODE_THREADS))
-    finally:
-        torch.set_num_threads(saved_threads[0]); cv2.setNumThreads(saved_threads[1]); reader.decode_threads = saved_threads[2]
-
-    saved_runtime = engine._runtime
-    try:
-        engine._runtime = engine._Runtime()
-        engine._runtime.failed_shapes, engine._runtime.batch_override = {(512, 1500)}, {(512, 800): 2}
-        state = engine.warm_up_state()
-        engine._runtime = engine._Runtime()
-        engine.adopt_warm_up(state["failed_shapes"], state["batch_override"])
-        checks.append(("parallel: workers start from the warm-up's failed shapes and lowered batches",
-                       engine._runtime.failed_shapes == {(512, 1500)} and engine._runtime.batch_override == {(512, 800): 2}))
-    finally:
-        engine._runtime = saved_runtime
-
-    saved = (hdfyer_profile.load_section, hdfyer_profile.profile_width)
-    measured = []
-    hdfyer_profile.load_section = lambda key: {"weights": "w", "strip_height": 512, "widths": {"800": {"best_batch": 2}}}
-    hdfyer_profile.profile_width = lambda *args, **kwargs: measured.append(args) or {"best_batch": 9}
-    try:
-        profile = hdfyer_profile.BatchProfile(None, "w", 512, on_missing=lambda width: 1)
-        checks.append(("parallel: a worker never measures a missing width; it answers through on_missing",
-                       profile(512, 800) == 2 and profile(512, 1500) == 1 and measured == []))
-    finally:
-        hdfyer_profile.load_section, hdfyer_profile.profile_width = saved
     return checks
 
 
@@ -514,7 +302,7 @@ def recovery_checks() -> list[tuple[str, bool]]:
     return checks
 
 
-def backend_checks() -> list[tuple[str, bool]]:
+def engine_checks() -> list[tuple[str, bool]]:
     """(description, passed) for each inference-backend check. None of them needs a GPU or TensorRT."""
     checks = []
 
@@ -649,11 +437,6 @@ def backend_checks() -> list[tuple[str, bool]]:
     finally:
         engine._runtime = saved_runtime
 
-    checks += profile_checks()
-    checks += parallel_checks()
-    checks += conversion_checks()
-    checks += pinned_pool_checks()
-    checks += recovery_checks()
 
     # SPAN's convolutions must be folded once at load, not on every forward pass.
     class FakeConv3XC:
@@ -683,154 +466,8 @@ def backend_checks() -> list[tuple[str, bool]]:
     return checks
 
 
-print("Backend checks (no GPU)")
-checks = backend_checks()
-for description, ok in checks:
-    if not ok:
-        print(f"  FAIL {description}")
-backend_failures = sum(not ok for _, ok in checks)
-print(f"  {'OK  ' if not backend_failures else 'FAIL'} {len(checks) - backend_failures}/{len(checks)} backend checks")
 
 
-
-def write_cbz(path: Path, pages: list[tuple[str, np.ndarray]], overlap: bool, workers: int = 4, max_inflight: int = 3, scale: int = SCALE) -> int:
-    """Runs fake stitched pages through the finishing path into a CBZ. Returns the most pages that were in flight at once."""
-    most_inflight = 0
-    with Packager(path, 'jpg', 92) as packager, PageFinisher(packager, workers, max_inflight, overlap, scale) as page_finisher:
-        for name, page in pages:
-            page_finisher.submit(name, page)
-            most_inflight = max(most_inflight, len(page_finisher._pending))
-    return most_inflight
-
-
-def cbz_entries(path: Path) -> list[tuple[str, bytes]]:
-    with zipfile.ZipFile(path) as z:
-        return [(name, z.read(name)) for name in z.namelist()]
-
-
-def finisher_checks() -> list[tuple[str, bool]]:
-    """(description, passed) for each page-finishing check. No GPU: the pages are random arrays."""
-    checks = []
-    rng = np.random.default_rng(2)
-    # Big pages first, so with several workers the later pages finish before the earlier ones.
-    heights = [2400, 1800, 96, 64, 1200, 32, 900, 48, 600, 16, 300, 8]
-    pages = [(f"{i:03d}__page.png", rng.integers(0, 256, (h, 640, 3), dtype=np.uint8)) for i, h in enumerate(heights)]
-    pages[3][1][:] = 5   # a near-black page, for the cleanup step
-    expected_names = [str(Path(name).with_suffix(".jpg")) for name, _ in pages]
-
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp = Path(tmp)
-        write_cbz(tmp / "serial.cbz", pages, overlap=False)
-        serial = cbz_entries(tmp / "serial.cbz")
-        checks.append(("serial: every page written, in order", [name for name, _ in serial] == expected_names))
-        decoded = cv2.imdecode(np.frombuffer(serial[0][1], np.uint8), cv2.IMREAD_COLOR)
-        checks.append(("serial: pages are halved JPEGs", decoded is not None and decoded.shape == (1200, 320, 3)))
-        black = cv2.imdecode(np.frombuffer(serial[3][1], np.uint8), cv2.IMREAD_COLOR)
-        checks.append(("serial: near-black page is cleaned to black", black is not None and int(black.max()) == 0))
-
-        for workers, max_inflight in [(4, 3), (1, 1), (8, 2), (2, 6)]:
-            label = f"overlap, {workers} workers, {max_inflight} in flight"
-            most = write_cbz(tmp / "overlap.cbz", pages, overlap=True, workers=workers, max_inflight=max_inflight)
-            overlapped = cbz_entries(tmp / "overlap.cbz")
-            checks.append((f"{label}: same page order as serial", [n for n, _ in overlapped] == [n for n, _ in serial]))
-            checks.append((f"{label}: every page byte-identical to serial", overlapped == serial))
-            checks.append((f"{label}: never more than {max_inflight} pages in flight", 1 <= most <= max_inflight))
-
-        # 2x pages (native 2x model): kept at their size, sharpened with radius 0.5, cleaned, same in both paths.
-        write_cbz(tmp / "serial2x.cbz", pages, overlap=False, scale=STUDENT_SCALE)
-        write_cbz(tmp / "overlap2x.cbz", pages, overlap=True, scale=STUDENT_SCALE)
-        serial2x = cbz_entries(tmp / "serial2x.cbz")
-        checks.append(("2x pages: overlapped CBZ byte-identical to serial",
-                       (tmp / "serial2x.cbz").read_bytes() == (tmp / "overlap2x.cbz").read_bytes()))
-        decoded = cv2.imdecode(np.frombuffer(serial2x[0][1], np.uint8), cv2.IMREAD_COLOR)
-        checks.append(("2x pages: not halved", decoded is not None and decoded.shape == (2400, 640, 3)))
-        expected = cleanup_near_black(sharpen(pages[4][1], radius=0.5))
-        ok, encoded = cv2.imencode(".jpg", expected, [cv2.IMWRITE_JPEG_QUALITY, 92])
-        checks.append(("2x pages: sharpen radius 0.5 then black cleanup, nothing else", ok and encoded.tobytes() == serial2x[4][1]))
-        black = cv2.imdecode(np.frombuffer(serial2x[3][1], np.uint8), cv2.IMREAD_COLOR)
-        checks.append(("2x pages: near-black page is cleaned to black", black is not None and int(black.max()) == 0))
-        try:
-            write_cbz(tmp / "bad.cbz", pages[:1], overlap=False, scale=3)
-            rejected = False
-        except ValueError:
-            rejected = True
-        checks.append(("a scale other than 2 or 4 is rejected", rejected))
-
-        # Pages really are finished off the calling thread, and several at once.
-        real_finish = finisher_module.finish_page
-        threads, running, most_running, lock = set(), 0, 0, threading.Lock()
-
-        def tracked_finish(page, packager, scale=SCALE):
-            nonlocal running, most_running
-            with lock:
-                threads.add(threading.current_thread().name)
-                running += 1
-                most_running = max(most_running, running)
-            time.sleep(0.05)
-            try:
-                return real_finish(page, packager, scale)
-            finally:
-                with lock:
-                    running -= 1
-
-        def failing_finish(page, packager, scale=SCALE):
-            if page.shape[0] == 96:
-                raise RuntimeError("simulated finishing failure")
-            return real_finish(page, packager, scale)
-
-        try:
-            finisher_module.finish_page = tracked_finish
-            write_cbz(tmp / "tracked.cbz", pages, overlap=True, workers=4, max_inflight=3)
-            checks.append(("overlap: pages are finished on worker threads",
-                           threads and threading.current_thread().name not in threads))
-            checks.append(("overlap: several pages are finished at once, within the limit", 2 <= most_running <= 3))
-            threads.clear()
-            write_cbz(tmp / "tracked.cbz", pages, overlap=False)
-            checks.append(("serial: pages are finished on the calling thread", threads == {threading.current_thread().name}))
-
-            # Same pages packaged twice, more than a zip timestamp tick (2 s) apart: the files must be byte-identical.
-            finisher_module.finish_page = real_finish
-            write_cbz(tmp / "first.cbz", pages, overlap=True)
-            time.sleep(2.1)
-            write_cbz(tmp / "second.cbz", pages, overlap=True)
-            checks.append(("packaging the same pages twice gives byte-identical CBZ files",
-                           (tmp / "first.cbz").read_bytes() == (tmp / "second.cbz").read_bytes()))
-            checks.append(("serial and overlapped CBZ files are byte-identical",
-                           (tmp / "serial.cbz").read_bytes() == (tmp / "second.cbz").read_bytes()))
-            with zipfile.ZipFile(tmp / "first.cbz") as z:
-                checks.append(("every zip entry has the fixed 1980-01-01 timestamp",
-                               all(info.date_time == (1980, 1, 1, 0, 0, 0) for info in z.infolist())))
-                checks.append(("zip entries keep their compression and permissions",
-                               all(info.compress_type == zipfile.ZIP_STORED and info.external_attr == 0o600 << 16
-                                   for info in z.infolist())))
-
-            # A failing page must fail the whole run, in both paths, and nothing after it may be written.
-            finisher_module.finish_page = failing_finish
-            for overlap in (True, False):
-                label = "overlap" if overlap else "serial"
-                try:
-                    write_cbz(tmp / "failed.cbz", pages, overlap=overlap)
-                    raised = False
-                except RuntimeError as e:
-                    raised = "simulated finishing failure" in str(e)
-                checks.append((f"{label}: a worker exception fails the run", raised))
-                written = [name for name, _ in cbz_entries(tmp / "failed.cbz")]
-                checks.append((f"{label}: pages after the failed one are not written", written == expected_names[:2]))
-        finally:
-            finisher_module.finish_page = real_finish
-
-    return checks
-
-
-print("Page-finishing checks (no GPU)")
-finish_checks = finisher_checks()
-for description, ok in finish_checks:
-    if not ok:
-        print(f"  FAIL {description}")
-finisher_failures = sum(not ok for _, ok in finish_checks)
-print(f"  {'OK  ' if not finisher_failures else 'FAIL'} {len(finish_checks) - finisher_failures}/{len(finish_checks)} page-finishing checks")
-
-print(f"\n{total - failures}/{total} passed")
-print(f"{len(checks) - backend_failures}/{len(checks)} backend checks passed")
-print(f"{len(finish_checks) - finisher_failures}/{len(finish_checks)} page-finishing checks passed")
-sys.exit(1 if failures or backend_failures or finisher_failures else 0)
+def checks(cbz_path: Path | None = None) -> list[tuple[str, bool]]:
+    return (round_trip_checks(cbz_path) + engine_checks() + profile_checks() + conversion_checks()
+            + pinned_pool_checks() + recovery_checks())
