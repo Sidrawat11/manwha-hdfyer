@@ -3,15 +3,16 @@
 # then:
 #   pip install -r requirements.txt
 
+# experiments 01-15: see tag pre-restructure for their requirements
+
 torch==2.10.0
-torchvision==0.25.0  # not imported directly; required by basicsr
+torchvision==0.25.0  # not imported directly; required by spandrel
 spandrel==0.4.2      # loads hdfyer, the production model
 opencv-python==4.13.0.92
 numpy==2.4.2
 imagesize==2.0.0
 tqdm==4.67.3
-basicsr==1.4.2       # teacher (4x-UltraSharp) architecture: experiments only
-matplotlib==3.10.8   # plotter.py only
+matplotlib==3.10.8   # experiments' charts only
 
 # OPTIONAL: TensorRT backend, several times faster than eager PyTorch. The pipeline works without
 # these and runs eager instead. Uncomment or install by hand:

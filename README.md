@@ -120,7 +120,7 @@ pip install tensorrt-cu12==11.4.0.106 onnx==1.23.2   # optional, recommended
 
 Put the HDFyer weights at `models/hdfyer/hdfyer-2x-s-r2.pth`. They are not in the repository; see the [model card](models/hdfyer/README.md).
 
-The experiments that run 4x-UltraSharp also need `models/4x-UltraSharp.pth` from [OpenModelDB](https://openmodeldb.info/models/4x-UltraSharp). They also need a one-line fix to `basicsr` if importing it fails with `No module named 'torchvision.transforms.functional_tensor'`: in `site-packages/basicsr/data/degradations.py`, change `torchvision.transforms.functional_tensor` to `torchvision.transforms.functional`. The main program does not need either.
+The experiments that run 4x-UltraSharp also need `models/4x-UltraSharp.pth` from [OpenModelDB](https://openmodeldb.info/models/4x-UltraSharp). They also need `basicsr` (see the requirements at tag `pre-restructure`) and a one-line fix to it if importing it fails with `No module named 'torchvision.transforms.functional_tensor'`: in `site-packages/basicsr/data/degradations.py`, change `torchvision.transforms.functional_tensor` to `torchvision.transforms.functional`. The main program does not need either.
 
 ## Usage
 
