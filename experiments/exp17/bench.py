@@ -30,14 +30,18 @@ main.process_all(Path({inp!r}), Path({outp!r}), backend={backend!r}, batch={batc
 """
 
 
+CODE_DIR = "."  # --code-dir: the checkout whose main.py is benchmarked (paths below are made absolute)
+
+
 def run(name, chapters, out, backend, batch, workers, parallel=1):
     """One config in a fresh process; returns parsed timings."""
-    res_dir = os.path.join(out, "tmp_results", name)
+    chapters = os.path.abspath(chapters)
+    res_dir = os.path.abspath(os.path.join(out, "tmp_results", name))
     shutil.rmtree(res_dir, ignore_errors=True)
     code = RUN.format(inp=chapters, outp=res_dir, backend=backend, batch=batch, workers=workers, inflight=workers + 2,
                       parallel=parallel)
     t = time.perf_counter()
-    p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+    p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, cwd=CODE_DIR,
                        env={**os.environ, "PYTHONUNBUFFERED": "1"})
     wall = time.perf_counter() - t
     log = (p.stdout or "") + "\n--- stderr ---\n" + (p.stderr or "")
@@ -89,9 +93,12 @@ def main():
     ap.add_argument("--batches", default="1,2,4,8,16")
     ap.add_argument("--workers", default="1,2,4,8,16")
     ap.add_argument("--quick", action="store_true", help="batch 1 and auto only (smoke test)")
+    ap.add_argument("--code-dir", default=".", help="checkout to benchmark (another commit's worktree); default: this one")
     ap.add_argument("--parallel", default="", help='e.g. "1,2,4,6,8": sweep main.py --parallel N only (batch 1, 4 CPU '
                                                    'workers per process); the batch and worker sweeps are skipped')
     a = ap.parse_args()
+    global CODE_DIR
+    CODE_DIR = os.path.abspath(a.code_dir)
     os.makedirs(a.out, exist_ok=True)
     ncpu = os.cpu_count() or 4
     many = min(16, ncpu)

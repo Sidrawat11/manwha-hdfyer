@@ -57,6 +57,8 @@ def main():
     ap.add_argument("--max-hours", type=float, default=1.0)
     ap.add_argument("--disk", type=int, default=40)
     ap.add_argument("--quick", action="store_true")
+    ap.add_argument("--compare", default="", help="also benchmark this git ref (e.g. a9a42b6) on the SAME machine, in "
+                                                  "its own checkout and engine cache; results in <run>/base/")
     ap.add_argument("--run", default=time.strftime("bench_%Y%m%d_%H%M"))
     ap.add_argument("--yes", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
@@ -122,6 +124,11 @@ def main():
         subprocess.run(ssh_in + [f"tar xf - -C {REMOTE}"], stdin=git.stdout, check=True); git.wait()
         tar = subprocess.Popen(["tar", "cf", "-", WEIGHTS, "experiments/exp17/bench.py"], stdout=subprocess.PIPE)  # bench.py: working copy, may be uncommitted
         subprocess.run(ssh_in + [f"tar xf - -C {REMOTE}"], stdin=tar.stdout, check=True); tar.wait()
+        if a.compare:  # the older commit in its own folder; shares only the weights (its engines may not be compatible)
+            cr.sh(ssh + [f"mkdir -p {REMOTE}/base"])
+            git_b = subprocess.Popen(["git", "archive", a.compare], stdout=subprocess.PIPE)
+            subprocess.run(ssh_in + [f"tar xf - -C {REMOTE}/base"], stdin=git_b.stdout, check=True); git_b.wait()
+            cr.sh(ssh + [f"mkdir -p {REMOTE}/base/{os.path.dirname(WEIGHTS)} && ln -sf {REMOTE}/{WEIGHTS} {REMOTE}/base/{WEIGHTS}"])  # link the FILE: models/hdfyer/ already exists there (model card)
         for c in CHAPTERS:  # flattened into bench_chapters/<series>/<chapter>.cbz
             dst = f"{REMOTE}/bench_chapters/{shlex.quote(os.path.basename(os.path.dirname(c)))}"
             with open(c, "rb") as f:
@@ -134,7 +141,9 @@ def main():
         # ssh channel, or ssh waits for it to finish (the "stuck at installing" hang of 12-13 Oct).
         remote_cmd = (f"cd {REMOTE} && setsid nohup bash -c \"({PIP}) > pip.log 2>&1 && "
                       f"python -c 'import torch, tensorrt, spandrel; print(torch.__version__, tensorrt.__version__, torch.cuda.get_device_name(0))' >> pip.log 2>&1 && "
-                      f"PYTHONUNBUFFERED=1 python experiments/exp17/bench.py {' '.join(bench_args)} > run.log 2>&1\" "
+                      + (f"PYTHONUNBUFFERED=1 python experiments/exp17/bench.py --code-dir base {' '.join(bench_args).replace(f'runs/{a.run}', f'runs/{a.run}/base')} > run.log 2>&1 && "
+                         if a.compare else "") +  # old code first, so the new run's DONE marks the end of everything
+                      f"PYTHONUNBUFFERED=1 python experiments/exp17/bench.py {' '.join(bench_args)} >> run.log 2>&1\" "
                       f"> /dev/null 2>&1 < /dev/null &")
         print("  installing torch 2.10 + TensorRT 11.4 on the server (a few minutes)...", flush=True)
         try:
