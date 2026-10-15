@@ -12,6 +12,7 @@ import cv2
 import numpy as np
 import torch
 from hdfyer.digest import trt as trt_backend
+from hdfyer.ingest.reader import _get_image_names
 from hdfyer.digest.stitch import reassemble
 from hdfyer.digest.strips import chunk_page, crop_upscaled
 
@@ -99,3 +100,14 @@ class FakeTrt:
         if not self.has_engine(height, width, batch):
             self.build(height, width, batch)
         return self.run_model(x)
+
+
+def extract_images(cbz_path):
+    """Reference decoder: every page load_chapter returns, read and decoded one at a time. Yields (name, image, bytes)."""
+    with zipfile.ZipFile(cbz_path) as z:
+        for name in _get_image_names(z):
+            raw_bytes = z.read(name)
+            image = cv2.imdecode(np.frombuffer(raw_bytes, np.uint8), cv2.IMREAD_COLOR)
+            if image is None:
+                continue
+            yield name, image, raw_bytes

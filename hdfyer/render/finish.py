@@ -1,9 +1,8 @@
 """CPU finishing of upscaled pages.
 
-Takes each stitched 4x page through sharpen -> black cleanup -> Lanczos half ->
-encode and writes it to the CBZ. A page from a native 2x model is already at its
-final size: it is sharpened with half the radius and not halved. By default the work runs on background threads
-so it overlaps with the GPU (OpenCV releases the GIL in blur, resize and encode),
+Takes each stitched 2x page through sharpen -> black cleanup -> encode and writes it
+to the CBZ. By default the work runs on background threads
+so it overlaps with the GPU (OpenCV releases the GIL in blur and encode),
 while the archive is only ever written by the calling thread, in the order the
 pages were handed over.
 """
@@ -32,34 +31,24 @@ def cleanup_near_black(image: np.ndarray, threshold: int = 15) -> np.ndarray:
     return result
 
 
-SHARPEN_RADIUS = {4: 1.0, 2: 0.5}   # the same blur width on the final 2x page either way
+# On the final 2x page: the same blur width as the old pipeline's radius 1.0 at 4x, before it halved the page.
+SHARPEN_RADIUS = 0.5
 
 
-def finish_page(page: np.ndarray, packager: Packager, scale: int = 4) -> bytes:
-    """
-    Sharpens and cleans up a stitched page and returns it at 2x, encoded in the packager's format.
-    A 4x page is halved after sharpening; a 2x page (scale=2) is left at its size.
-    """
-    if scale not in SHARPEN_RADIUS:
-        raise ValueError(f"finish_page handles 4x and 2x pages, got {scale}x")
-    page = sharpen(page, radius=SHARPEN_RADIUS[scale])
+def finish_page(page: np.ndarray, packager: Packager) -> bytes:
+    """Sharpens and cleans up a stitched 2x page and returns it encoded in the packager's format."""
+    page = sharpen(page, radius=SHARPEN_RADIUS)
     page = cleanup_near_black(page)
-    if scale == 4:
-        h, w = page.shape[:2]
-        page = cv2.resize(page, (w // 2, h // 2), interpolation=cv2.INTER_LANCZOS4)
     return packager.encode(page)
 
 
 class PageFinisher:
     """Finishes pages and writes them to the packager in submission order. Supports use as a context manager."""
 
-    def __init__(self, packager: Packager, workers: int = 4, max_inflight: int = 3, overlap: bool = True, scale: int = 4):
+    def __init__(self, packager: Packager, workers: int = 4, max_inflight: int = 3, overlap: bool = True):
         if workers < 1 or max_inflight < 1:
             raise ValueError("workers and max_inflight must be at least 1")
-        if scale not in SHARPEN_RADIUS:
-            raise ValueError(f"PageFinisher handles 4x and 2x pages, got {scale}x")
         self.packager = packager
-        self.scale = scale
         self.max_inflight = max_inflight
         self._executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="finish") if overlap else None
         self._pending = deque()   # (page name, future) in submission order
@@ -91,14 +80,14 @@ class PageFinisher:
         and when that limit is reached this waits for the oldest one first.
         """
         if self._executor is None:
-            self.packager.add_encoded(name, finish_page(page, self.packager, self.scale))
+            self.packager.add_encoded(name, finish_page(page, self.packager))
             return
 
         while self._pending and self._pending[0][1].done():
             self._write_oldest()
         while len(self._pending) >= self.max_inflight:
             self._write_oldest()
-        self._pending.append((name, self._executor.submit(finish_page, page, self.packager, self.scale)))
+        self._pending.append((name, self._executor.submit(finish_page, page, self.packager)))
 
     def drain(self) -> None:
         """Waits for every page still in flight and writes them in order."""

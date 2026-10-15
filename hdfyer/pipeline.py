@@ -74,7 +74,7 @@ def process_chapter_v2(cbz_path: Path, model: torch.nn.Module, output_path: Path
 
     page_buffer = PageBuffer(scale)
     # A worker's exception surfaces in submit() or when the finisher closes, and fails the chapter.
-    with Packager(output_path, 'jpg', 92) as packager, PageFinisher(packager, cpu_workers, max_inflight, overlap, scale) as finisher:
+    with Packager(output_path, 'jpg', 92) as packager, PageFinisher(packager, cpu_workers, max_inflight, overlap) as finisher:
         # One batch in flight: stitching and hand-off below run while the GPU works on the next batch.
         for batch, results in tqdm(upscale_stream(batches, model, scale), total=len(batches), desc="Upscaling batches", disable=quiet):
             for upscaled_array, meta in results:

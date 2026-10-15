@@ -16,21 +16,11 @@ import numpy as np
 DECODE_THREADS = 4
 decode_threads = DECODE_THREADS   # what this process uses: DECODE_THREADS, or less with --parallel (parallel.configure_threads)
 
-def extract_images(cbz_path):
-    with zipfile.ZipFile(cbz_path) as z:
-        file_list = _get_image_names(z)
-        for name in file_list:
-            raw_bytes = z.read(name)
-            image = cv2.imdecode(np.frombuffer(raw_bytes, np.uint8), cv2.IMREAD_COLOR)
-            if image is None:
-                continue
-            yield name, image, raw_bytes
-
 def load_chapter(cbz_path, threads=4):
     """
-    Every page extract_images would yield, as a list of (name, image), decoded on `threads` threads.
+    Every page of a chapter, as a list of (name, image) in name order, decoded on `threads` threads.
     The archive is read on the calling thread (a ZipFile can't be shared between threads); OpenCV's decoders
-    release the GIL, so the decodes run in parallel. Same images as extract_images, same order.
+    release the GIL, so the decodes run in parallel. Entries that don't decode are skipped.
     """
     with zipfile.ZipFile(cbz_path) as z:
         raw = [(name, z.read(name)) for name in _get_image_names(z)]
@@ -39,17 +29,13 @@ def load_chapter(cbz_path, threads=4):
     return [(name, image) for (name, _), image in zip(raw, images) if image is not None]
 
 def page_sizes(cbz_path):
-    """(width, height) of every page extract_images would yield, read from the image headers without decoding."""
+    """(width, height) of every page load_chapter would return, read from the image headers without decoding."""
     sizes = []
     with zipfile.ZipFile(cbz_path) as z:
         for name in _get_image_names(z):
             with z.open(name) as raw:
                 sizes.append(imagesize.get(io.BytesIO(raw.read(65536))))
     return sizes
-
-def count_images(cbz_path):
-    with zipfile.ZipFile(cbz_path) as z:
-        return len(_get_image_names(z))
 
 def _get_image_names(z):
     include_filter = ('.jpg', '.png', '.jpeg', '.webp')

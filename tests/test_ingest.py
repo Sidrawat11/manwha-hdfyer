@@ -11,6 +11,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
+from tests.helpers import extract_images
 
 
 def checks() -> list[tuple[str, bool]]:
@@ -29,7 +30,7 @@ def checks() -> list[tuple[str, bool]]:
                 z.writestr(name, data.tobytes())
             z.writestr("__MACOSX/._001.png", b"junk")
             z.writestr("ComicInfo.xml", b"<x/>")
-        decoded = [(image.shape[1], image.shape[0]) for _, image, _ in extractor.extract_images(cbz)]
+        decoded = [(image.shape[1], image.shape[0]) for _, image, _ in extract_images(cbz)]
         checks.append(("parallel: the warm-up's header scan sees exactly the pages the workers decode",
                        extractor.page_sizes(cbz) == decoded == [(1080, 40), (690, 300), (800, 90)]))
 
@@ -45,9 +46,9 @@ def checks() -> list[tuple[str, bool]]:
 
         decoded_in_threads = extractor.load_chapter(cbz, threads=3)
         checks.append(("decode ahead: threaded decoding gives the same pages, in the same order",
-                       [n for n, _ in decoded_in_threads] == [n for n, _, _ in extractor.extract_images(cbz)]
+                       [n for n, _ in decoded_in_threads] == [n for n, _, _ in extract_images(cbz)]
                        and all(np.array_equal(a, b) for (_, a), (_, _, b) in
-                               zip(decoded_in_threads, [(n, i, i) for n, i, _ in extractor.extract_images(cbz)]))))
+                               zip(decoded_in_threads, [(n, i, i) for n, i, _ in extract_images(cbz)]))))
 
     # Prefetch: chapters come back in order, the next one is loaded while the caller works, never more than one ahead.
     saved_load = reader.load_chapter

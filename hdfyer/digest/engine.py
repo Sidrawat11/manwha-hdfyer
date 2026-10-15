@@ -1,8 +1,8 @@
 """Custom inference engine.
 
 Owns the RRDBNet forward pass directly, replacing the Real-ESRGAN dependency.
-Handles FP16 casting, tensor pre/post processing, and exposes a clean upscale
-interface to the pipeline.
+Handles FP16 casting and tensor pre/post processing, and exposes batch_upscale and
+upscale_stream to the pipeline.
 
 The forward pass has three runtimes, chosen once with select_backend():
   trt       TensorRT FP16 engines (digest/trt.py), fixed batch size per engine
@@ -157,17 +157,6 @@ def _postprocess(tensor: torch.Tensor, round_output: bool = False) -> np.ndarray
     transposing and swapping channels on the CPU cost more than the model's forward pass for a 2x strip.
     """
     return _to_bgr_uint8(tensor, round_output).contiguous().cpu().numpy()
-
-
-def upscale(image: np.ndarray, model: torch.nn.Module, scale: int = 4) -> np.ndarray:
-    """Upscales a single BGR uint8 image. Calls preprocess, pad, model forward, unpad, postprocess."""
-    x = _preprocess(image)
-    x_padded, pad_h, pad_w = _pad(x, scale)
-    with torch.no_grad():
-        y = model(x_padded)
-    y_unpadded = _unpad(y, pad_h, pad_w, scale)
-    img = _postprocess(y_unpadded)
-    return img
 
 
 def _is_oom(error: Exception) -> bool:

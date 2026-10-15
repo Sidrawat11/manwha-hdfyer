@@ -30,7 +30,7 @@ def round_trip_checks(cbz_path: Path | None = None) -> list[tuple[str, bool]]:
     small = np.random.default_rng(0).integers(0, 256, (400, 300, 3), dtype=np.uint8)
     cases = [("synthetic 300x400", small)]
     if cbz_path is not None:
-        cases += [(name, image) for name, image, _ in extractor.extract_images(cbz_path)]
+        cases += [(name, image) for name, image, _ in extract_images(cbz_path)]
     else:
         print("  (no CBZ in Manwhas/: real-page cases skipped)")
 

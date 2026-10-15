@@ -17,10 +17,10 @@ from hdfyer.render.package import Packager
 from tests.helpers import *
 
 
-def write_cbz(path: Path, pages: list[tuple[str, np.ndarray]], overlap: bool, workers: int = 4, max_inflight: int = 3, scale: int = SCALE) -> int:
+def write_cbz(path: Path, pages: list[tuple[str, np.ndarray]], overlap: bool, workers: int = 4, max_inflight: int = 3) -> int:
     """Runs fake stitched pages through the finishing path into a CBZ. Returns the most pages that were in flight at once."""
     most_inflight = 0
-    with Packager(path, 'jpg', 92) as packager, PageFinisher(packager, workers, max_inflight, overlap, scale) as page_finisher:
+    with Packager(path, 'jpg', 92) as packager, PageFinisher(packager, workers, max_inflight, overlap) as page_finisher:
         for name, page in pages:
             page_finisher.submit(name, page)
             most_inflight = max(most_inflight, len(page_finisher._pending))
@@ -47,8 +47,6 @@ def checks() -> list[tuple[str, bool]]:
         write_cbz(tmp / "serial.cbz", pages, overlap=False)
         serial = cbz_entries(tmp / "serial.cbz")
         checks.append(("serial: every page written, in order", [name for name, _ in serial] == expected_names))
-        decoded = cv2.imdecode(np.frombuffer(serial[0][1], np.uint8), cv2.IMREAD_COLOR)
-        checks.append(("serial: pages are halved JPEGs", decoded is not None and decoded.shape == (1200, 320, 3)))
         black = cv2.imdecode(np.frombuffer(serial[3][1], np.uint8), cv2.IMREAD_COLOR)
         checks.append(("serial: near-black page is cleaned to black", black is not None and int(black.max()) == 0))
 
@@ -60,31 +58,18 @@ def checks() -> list[tuple[str, bool]]:
             checks.append((f"{label}: every page byte-identical to serial", overlapped == serial))
             checks.append((f"{label}: never more than {max_inflight} pages in flight", 1 <= most <= max_inflight))
 
-        # 2x pages (native 2x model): kept at their size, sharpened with radius 0.5, cleaned, same in both paths.
-        write_cbz(tmp / "serial2x.cbz", pages, overlap=False, scale=STUDENT_SCALE)
-        write_cbz(tmp / "overlap2x.cbz", pages, overlap=True, scale=STUDENT_SCALE)
-        serial2x = cbz_entries(tmp / "serial2x.cbz")
-        checks.append(("2x pages: overlapped CBZ byte-identical to serial",
-                       (tmp / "serial2x.cbz").read_bytes() == (tmp / "overlap2x.cbz").read_bytes()))
-        decoded = cv2.imdecode(np.frombuffer(serial2x[0][1], np.uint8), cv2.IMREAD_COLOR)
-        checks.append(("2x pages: not halved", decoded is not None and decoded.shape == (2400, 640, 3)))
+        # Pages are kept at their size, sharpened with radius 0.5 and cleaned up, nothing else.
+        decoded = cv2.imdecode(np.frombuffer(serial[0][1], np.uint8), cv2.IMREAD_COLOR)
+        checks.append(("pages are not resized", decoded is not None and decoded.shape == (2400, 640, 3)))
         expected = cleanup_near_black(sharpen(pages[4][1], radius=0.5))
         ok, encoded = cv2.imencode(".jpg", expected, [cv2.IMWRITE_JPEG_QUALITY, 92])
-        checks.append(("2x pages: sharpen radius 0.5 then black cleanup, nothing else", ok and encoded.tobytes() == serial2x[4][1]))
-        black = cv2.imdecode(np.frombuffer(serial2x[3][1], np.uint8), cv2.IMREAD_COLOR)
-        checks.append(("2x pages: near-black page is cleaned to black", black is not None and int(black.max()) == 0))
-        try:
-            write_cbz(tmp / "bad.cbz", pages[:1], overlap=False, scale=3)
-            rejected = False
-        except ValueError:
-            rejected = True
-        checks.append(("a scale other than 2 or 4 is rejected", rejected))
+        checks.append(("pages: sharpen radius 0.5 then black cleanup, nothing else", ok and encoded.tobytes() == serial[4][1]))
 
         # Pages really are finished off the calling thread, and several at once.
         real_finish = finisher_module.finish_page
         threads, running, most_running, lock = set(), 0, 0, threading.Lock()
 
-        def tracked_finish(page, packager, scale=SCALE):
+        def tracked_finish(page, packager):
             nonlocal running, most_running
             with lock:
                 threads.add(threading.current_thread().name)
@@ -92,15 +77,15 @@ def checks() -> list[tuple[str, bool]]:
                 most_running = max(most_running, running)
             time.sleep(0.05)
             try:
-                return real_finish(page, packager, scale)
+                return real_finish(page, packager)
             finally:
                 with lock:
                     running -= 1
 
-        def failing_finish(page, packager, scale=SCALE):
+        def failing_finish(page, packager):
             if page.shape[0] == 96:
                 raise RuntimeError("simulated finishing failure")
-            return real_finish(page, packager, scale)
+            return real_finish(page, packager)
 
         try:
             finisher_module.finish_page = tracked_finish
