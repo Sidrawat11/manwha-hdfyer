@@ -49,32 +49,39 @@ CBZ → decode pages
     → output CBZ, written as .part and renamed when the chapter is complete
 ```
 
-**Strip planner** (`inference/chunker.py`). A manhwa page is typically 700–1080 px wide and 3000–9000 px tall, too big to upscale in one go. Every page is cut into strips of exactly 512 rows. Strips step down the page with 32 rows of overlap, so each seam has context on both sides. The last strip is anchored to the bottom of the page: it overlaps its neighbour by more than 32 rows, and the extra rows are thrown away after upscaling. A page shorter than 512 rows is padded to a full strip by reflecting it downwards, and the reflection is cropped off afterwards. After upscaling, each 32-row overlap is cross-faded from one strip to the next, which hides the seams. Stitched strips differ from upscaling the same area in one pass by at most 2 grey levels, and only near the seams. Because every strip of a given page width has exactly the same shape, one compiled engine per width covers everything.
+**Strip planner** (`hdfyer/digest/strips.py`). A manhwa page is typically 700–1080 px wide and 3000–9000 px tall, too big to upscale in one go. Every page is cut into strips of exactly 512 rows. Strips step down the page with 32 rows of overlap, so each seam has context on both sides. The last strip is anchored to the bottom of the page: it overlaps its neighbour by more than 32 rows, and the extra rows are thrown away after upscaling. A page shorter than 512 rows is padded to a full strip by reflecting it downwards, and the reflection is cropped off afterwards. After upscaling, each 32-row overlap is cross-faded from one strip to the next, which hides the seams. Stitched strips differ from upscaling the same area in one pass by at most 2 grey levels, and only near the seams. Because every strip of a given page width has exactly the same shape, one compiled engine per width covers everything.
 
-**HDFyer** (`core/model_loader.py`, [model card](models/hdfyer/README.md)). HDFyer is a SPAN-S network of about 2 million parameters. SPAN is a lightweight super-resolution architecture. It started from the public JaNai SPAN weights and was then trained on 548 manhwa pages to copy the output of 4x-UltraSharp, a much larger model with a look I like. The training run behind the current model cost about $6 of rented GPU time (two runs, about $10 in total); the training code is in [experiments/exp16/](experiments/exp16/). SPAN merges some of its layers when it is switched from training to inference. The library I load it with redoes that merge on every pass, so I merge once at load time.
+**HDFyer** (`hdfyer/digest/model.py`, [model card](models/hdfyer/README.md)). HDFyer is a SPAN-S network of about 2 million parameters. SPAN is a lightweight super-resolution architecture. It started from the public JaNai SPAN weights and was then trained on 548 manhwa pages to copy the output of 4x-UltraSharp, a much larger model with a look I like. The training run behind the current model cost about $6 of rented GPU time (two runs, about $10 in total); the training code is in [experiments/exp16/](experiments/exp16/). SPAN merges some of its layers when it is switched from training to inference. The library I load it with redoes that merge on every pass, so I merge once at load time.
 
-**TensorRT engines** (`inference/trt_backend.py`). TensorRT is NVIDIA's runtime that compiles a model into an "engine" tuned for one GPU and one input shape. Engines use FP16 (half-precision numbers, faster on modern GPUs). Their output differs from plain PyTorch by at most 9 grey levels on any pixel, and by under 0.2 on average, across 184 test pages. An engine is built the first time a page width is seen; a 1080 px width took 51 s on the laptop. Engines are cached in `cache/trt_engines/`. The file name records the input shape, batch size, a hash of the model weights, the GPU and the TensorRT version, so a changed model or a different machine always gets a fresh build. One HDFyer strip takes about 18 ms through TensorRT on the laptop, against 58 ms in plain PyTorch.
+**TensorRT engines** (`hdfyer/digest/trt.py`). TensorRT is NVIDIA's runtime that compiles a model into an "engine" tuned for one GPU and one input shape. Engines use FP16 (half-precision numbers, faster on modern GPUs). Their output differs from plain PyTorch by at most 9 grey levels on any pixel, and by under 0.2 on average, across 184 test pages. An engine is built the first time a page width is seen; a 1080 px width took 51 s on the laptop. Engines are cached in `cache/trt_engines/`. The file name records the input shape, batch size, a hash of the model weights, the GPU and the TensorRT version, so a changed model or a different machine always gets a fresh build. One HDFyer strip takes about 18 ms through TensorRT on the laptop, against 58 ms in plain PyTorch.
 
-**Batch size from the profiler** (`profiler/hdfyer.py`). Several strips can go through the model in one pass (a batch). The first time the program sees a page width on a GPU, it times batch sizes 1, 2, 4 and 8. It stops before a batch would use more than 75% of the GPU's memory, and stores the best one in `cache/<gpu>.json`. A larger batch has to be at least 3% faster per strip to be chosen. On the RTX 4060 laptop every batch size takes the same time per strip, so it picks 1. On a large datacenter GPU it can pick more.
+**Batch size from the profiler** (`hdfyer/digest/batch_profile.py`). Several strips can go through the model in one pass (a batch). The first time the program sees a page width on a GPU, it times batch sizes 1, 2, 4 and 8. It stops before a batch would use more than 75% of the GPU's memory, and stores the best one in `cache/<gpu>.json`. A larger batch has to be at least 3% faster per strip to be chosen. On the RTX 4060 laptop every batch size takes the same time per strip, so it picks 1. On a large datacenter GPU it can pick more.
 
-**CPU overlap** (`pipeline/finisher.py`). Once a page is stitched, it is sharpened (a gentle unsharp mask), near-black pixels are set to pure black (this removes blotchy noise in dark areas), and it is JPEG-encoded. These run on a pool of background threads while the GPU carries on with the next pages. Only the main thread writes to the CBZ, in the order pages come off the GPU, and the output is byte-identical to doing it all on one thread. The CBZ itself is reproducible: the same input gives the same file byte for byte.
+**CPU overlap** (`hdfyer/render/finish.py`). Once a page is stitched, it is sharpened (a gentle unsharp mask), near-black pixels are set to pure black (this removes blotchy noise in dark areas), and it is JPEG-encoded. These run on a pool of background threads while the GPU carries on with the next pages. Only the main thread writes to the CBZ, in the order pages come off the GPU, and the output is byte-identical to doing it all on one thread. The CBZ itself is reproducible: the same input gives the same file byte for byte.
 
-**Loud fallbacks** (`inference/engine.py`). If an engine cannot be built or fails while running, that strip shape falls back to plain PyTorch for the rest of the run. If the GPU runs out of memory, the program frees the failed engine and its memory and retries with a smaller batch. Every one of these events is printed when it happens, as a `!!! FALLBACK:` line naming the chapter, the pages, the strip shape and the reason. All of them are listed again in a summary at the end of the run. A clean run ends with "Fallbacks: none."
+**Loud fallbacks** (`hdfyer/digest/engine.py`). If an engine cannot be built or fails while running, that strip shape falls back to plain PyTorch for the rest of the run. If the GPU runs out of memory, the program frees the failed engine and its memory and retries with a smaller batch. Every one of these events is printed when it happens, as a `!!! FALLBACK:` line naming the chapter, the pages, the strip shape and the reason. All of them are listed again in a summary at the end of the run. A clean run ends with "Fallbacks: none."
 
 ### Code layout
 
+The pipeline has three parts: **ingest** (find and read chapters), **digest** (strips through the model and back into pages) and **render** (finish and write the output).
+
 ```
-main.py                    entry point: loads HDFyer, processes every chapter in Manwhas/
-core/                      CBZ reading, model loading, CBZ writing
-inference/chunker.py       strip planner
-inference/batcher.py       groups same-shape strips into batches
-inference/engine.py        pre/post-processing, backend choice, fallbacks and out-of-memory recovery
-inference/trt_backend.py   TensorRT engine build, cache and run
-profiler/hdfyer.py         best batch size per GPU and page width
-pipeline/                  per-page strip collection, stitching, background finishing
-postprocessing/            sharpening and black cleanup
-experiments/               numbered experiments behind every change above (see experiments/README.md)
-test.py                    tests that need no model: stitching, fallbacks, recovery, finishing
+main.py                          command line: parses the flags, calls hdfyer.pipeline.process_all
+hdfyer/pipeline.py               one chapter at a time: load the model, then ingest -> digest -> render per chapter
+hdfyer/parallel.py               --parallel N: warm-up, worker processes, per-process thread limits
+hdfyer/ingest/library.py         which chapters in Manwhas/ still need doing
+hdfyer/ingest/reader.py          CBZ -> decoded pages, and decoding the next chapter ahead
+hdfyer/digest/strips.py          pages -> fixed 512-row strips (anchored last strip, padded short pages)
+hdfyer/digest/batches.py         groups same-shape strips into batches
+hdfyer/digest/model.py           loads HDFyer and folds its convolutions once
+hdfyer/digest/engine.py          upload, forward pass, download; backend choice, fallbacks, out-of-memory recovery
+hdfyer/digest/trt.py             TensorRT engine build, cache and run
+hdfyer/digest/batch_profile.py   best batch size per GPU and page width, kept in cache/<gpu>.json
+hdfyer/digest/stitch.py          collects each page's strips and blends them back into a page
+hdfyer/render/finish.py          sharpening, black cleanup and JPEG encoding on background threads
+hdfyer/render/package.py         writes the output CBZ (reproducible: fixed timestamps)
+tests/                           tests that need no GPU or model, one file per part; python -m tests.run_all
+experiments/                     numbered experiments behind every change above (see experiments/README.md)
 ```
 
 ---
@@ -135,10 +142,10 @@ Output goes to `results/`, mirroring the input folders. Chapters already done ar
 | `--no-overlap` | off | Do the sharpening and encoding on the main thread, for debugging and comparison. |
 | `--parallel N` | `1` | Chapters processed at once, each in its own worker process with its own copy of the model. For large GPUs (16 GB+), where one Python process can't keep the GPU busy; on a laptop it gains little. A warm-up builds every engine and batch profile first, so the workers never write the caches. |
 
-Run the tests (no model needed, a few minutes):
+Run the tests (no GPU or model needed, about a minute):
 
 ```bash
-python test.py
+python -m tests.run_all
 ```
 
 ---

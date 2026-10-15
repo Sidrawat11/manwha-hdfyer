@@ -1,5 +1,7 @@
 # Experiments
 
+Experiments 01-15 ran against the pre-restructure layout: `git checkout pre-restructure` to rerun them.
+
 Each experiment is numbered to match the lab notebook (the shared doc). All use the same
 60-page sample (`out/sample.json`, seed 2026: 20 random chapters per series, one random page each).
 Run everything from the repo root, e.g. `python experiments/exp02_tile_census.py`.
