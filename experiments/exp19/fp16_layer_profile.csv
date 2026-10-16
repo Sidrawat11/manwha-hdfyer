@@ -1,0 +1,7 @@
+category,layers,ms_per_strip,pct_of_gpu_time
+convolution,22,16.963,94.0
+reformat,9,0.918,5.1
+shuffle / pixel-shuffle,1,0.156,0.9
+other (NoOp),1,0.0,0.0
+"total (sum of layers, profiled)",33,18.038,100.0
+"whole engine, unprofiled",,18.336,

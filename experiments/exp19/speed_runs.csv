@@ -1,0 +1,13 @@
+run,round,precision,ok,chapter_s,s_per_page,engine_ms_per_strip,process_s,gpu_temp_start_c,gpu_temp_end_c,sw_power_capping_us,sw_thermal_slowdown_us,hw_thermal_slowdown_us,hw_power_braking_us,clock_events_active_after
+0,1,fp16,True,7.1,0.2088,17.809,39.4,38,48,5528784,0,0,0,
+1,1,int8-default,True,9.7,0.2853,22.57,43.9,39,48,0,0,0,0,
+2,1,int8-mixed,True,10.0,0.2941,23.546,46.2,41,49,0,0,0,0,
+3,2,fp16,True,7.0,0.2059,17.987,45.4,41,47,6535415,0,0,0,Idle
+4,2,int8-default,True,14.8,0.4353,22.553,50.1,41,50,56304,0,0,0,
+5,2,int8-mixed,True,10.0,0.2941,22.956,48.1,42,49,1472867,0,0,0,Idle
+6,3,fp16,True,7.0,0.2059,17.988,36.9,43,51,6898525,0,0,0,
+7,3,int8-default,True,10.3,0.3029,22.547,45.8,42,51,0,0,0,0,
+8,3,int8-mixed,True,9.7,0.2853,23.136,46.7,44,51,0,0,0,0,Idle
+9,4,fp16,True,7.0,0.2059,17.949,47.1,44,49,7271455,0,0,0,Idle
+10,4,int8-default,True,12.1,0.3559,22.32,47.0,42,51,0,0,0,0,
+11,4,int8-mixed,True,10.0,0.2941,22.814,47.3,43,49,552704,0,0,0,Idle

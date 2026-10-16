@@ -1,0 +1,19 @@
+engine,category,layers,ms_per_strip,pct
+fp16,convolution (with whatever TensorRT fused into it),22,16.583,93.9
+fp16,reformat / copy,9,0.928,5.3
+fp16,shuffle / pixel-shuffle,2,0.154,0.9
+fp16,total (profiled),33,17.666,100.0
+int8-default,convolution (with whatever TensorRT fused into it),29,10.344,47.2
+int8-default,standalone element-wise,12,4.897,22.3
+int8-default,reformat / copy,20,3.412,15.6
+int8-default,standalone quantize / dequantize,12,3.108,14.2
+int8-default,shuffle / pixel-shuffle,2,0.123,0.6
+int8-default,other,2,0.05,0.2
+int8-default,total (profiled),77,21.934,100.0
+int8-mixed,convolution (with whatever TensorRT fused into it),30,10.598,46.4
+int8-mixed,standalone element-wise,12,4.73,20.7
+int8-mixed,reformat / copy,27,4.471,19.6
+int8-mixed,standalone quantize / dequantize,11,2.806,12.3
+int8-mixed,shuffle / pixel-shuffle,2,0.146,0.6
+int8-mixed,other,2,0.1,0.4
+int8-mixed,total (profiled),84,22.851,100.0
