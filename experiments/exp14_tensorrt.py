@@ -11,7 +11,7 @@ Modes, per page, same process:
 Quality: SSIM of each mode vs eager on the raw 2x output (Lanczos half of 4x, as in exp 12/13).
 Pages: 10 new random pages (seed 2029), chapters not used in any earlier experiment.
 
-Outputs (experiments/out/exp14_tensorrt/):
+Outputs (outputs/exp14_tensorrt/):
   results.jsonl, summary.txt
   compare_pageNN.html   tablet comparer: Eager / TensorRT / Compiled / Difference x8 buttons + slider
   engines/*.plan        cached TensorRT engines (reused on rerun)
@@ -31,19 +31,19 @@ import cv2, numpy as np
 from common import page_names, read_page, load_sample, detail_scores
 import exp06_split_vs_full as e6
 
-OUT = "experiments/out/exp14_tensorrt"
+OUT = "outputs/exp14_tensorrt"
 ENG = os.path.join(OUT, "engines")
 SCALE = 4
 
 
 def new_pages(n_per_series=4, seed=2029, limit=10):
     used = {p["cbz"] for p in load_sample()}
-    for f in ("experiments/out/exp12_strip_sweep/pages.json", "experiments/out/exp13_strips_vs_routing/pages.json"):
+    for f in ("outputs/exp12_strip_sweep/pages.json", "outputs/exp13_strips_vs_routing/pages.json"):
         if os.path.exists(f):
             used |= {p["cbz"] for p in json.load(open(f))}
     rng = random.Random(seed); pages = []
-    for series in sorted(os.listdir("Manwhas")):
-        cbzs = [c for c in sorted(glob.glob(os.path.join("Manwhas", series, "*.cbz"))) if c not in used]
+    for series in sorted(os.listdir("data/library")):
+        cbzs = [c for c in sorted(glob.glob(os.path.join("data/library", series, "*.cbz"))) if c not in used]
         for cbz in rng.sample(cbzs, n_per_series):
             pages.append({"series": series, "cbz": cbz, "page": rng.choice(page_names(cbz))})
     rng.shuffle(pages)

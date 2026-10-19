@@ -9,7 +9,7 @@ Quality: each scored against "today" at 2x. Pass bar as before: no page below 0.
 Pages: 5 per series from chapters used in neither the 60-page sample nor exp 12 (seed 2028).
 
 Seam check (end of run): exp 12 pages 4 and 14, where one band of rows scored low at 32-row overlap.
-Saves out/exp13_strips_vs_routing/seam_pageNN.jpg: [today | strips | difference x8] around the worst rows.
+Saves outputs/exp13_strips_vs_routing/seam_pageNN.jpg: [today | strips | difference x8] around the worst rows.
 
 GPU: python experiments/exp13_strips_vs_routing.py   (resumable; STOP file in the out folder stops it)
 """
@@ -23,16 +23,16 @@ from common import page_names, read_page, load_sample, classify_detail
 from exp12_strip_sweep import strip_plan, today_plan
 import exp06_split_vs_full as e6
 
-OUT = "experiments/out/exp13_strips_vs_routing"
+OUT = "outputs/exp13_strips_vs_routing"
 SCALE = 4
 SEAM_PAGES = [4, 14]   # indices into exp 12's pages.json
 
 def new_pages(per_series=5, seed=2028):
     used = {p["cbz"] for p in load_sample()}
-    used |= {p["cbz"] for p in json.load(open("experiments/out/exp12_strip_sweep/pages.json"))}
+    used |= {p["cbz"] for p in json.load(open("outputs/exp12_strip_sweep/pages.json"))}
     rng = random.Random(seed); pages = []
-    for series in sorted(os.listdir("Manwhas")):
-        cbzs = [c for c in sorted(glob.glob(os.path.join("Manwhas", series, "*.cbz"))) if c not in used]
+    for series in sorted(os.listdir("data/library")):
+        cbzs = [c for c in sorted(glob.glob(os.path.join("data/library", series, "*.cbz"))) if c not in used]
         for cbz in rng.sample(cbzs, per_series):
             pages.append({"series": series, "cbz": cbz, "page": rng.choice(page_names(cbz))})
     return pages
@@ -134,7 +134,7 @@ def main():
     log.close()
 
     # ---- seam check on exp 12's flagged pages
-    exp12 = json.load(open("experiments/out/exp12_strip_sweep/pages.json"))
+    exp12 = json.load(open("outputs/exp12_strip_sweep/pages.json"))
     for k in SEAM_PAGES:
         p = exp12[k]; src = read_page(p["cbz"], p["page"])
         ref2 = e6.half(run_strips(src, 898, 128, True)); s2 = e6.half(run_strips(src, 512, 32, False))

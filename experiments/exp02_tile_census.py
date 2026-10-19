@@ -21,7 +21,7 @@ for i, p in enumerate(sample):
     rows.append(rec)
     print(f"{i+1:2d}/60 {p['series'][:22]:22s} edge64={rec['edge64']:5.1f}%", flush=True)
 
-with open("experiments/out/exp02_tile_census.json", "w") as f:
+with open("outputs/exp02_tile_census.json", "w") as f:
     json.dump(rows, f, indent=1)
 
 def summary(sel, key):

@@ -1,4 +1,4 @@
-"""Exp 19: build and load TensorRT engines for one precision at one strip shape, cached under experiments/out/exp19/engines/.
+"""Exp 19: build and load TensorRT engines for one precision at one strip shape, cached under outputs/exp19-int8/engines/.
 
 The file name is production's cache key with the precision added (..._fp16.plan becomes ..._int8-default.plan), so
 an INT8 engine can never be mistaken for an FP16 one. The FP16 reference is production itself: its engine comes from
@@ -10,7 +10,7 @@ import tensorrt as trt
 from hdfyer.digest import trt as prod_trt
 
 WEIGHTS = "models/hdfyer/hdfyer-2x-s-r2.pth"
-OUT = "experiments/out/exp19"
+OUT = "outputs/exp19-int8"
 ENGINE_DIR = f"{OUT}/engines"
 LOGGER = trt.Logger(trt.Logger.WARNING)
 _hash = None

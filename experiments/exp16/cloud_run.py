@@ -3,10 +3,10 @@
 What it does
   1. Finds the cheapest suitable offer, trying GPUs in your order of preference, under a price cap.
   2. Shows you the GPU, price and worst-case cost, and asks y/N (skip with --yes).
-  3. Rents it, waits until it is up, uploads only what is needed (~340 MB: training/*.cbz,
+  3. Rents it, waits until it is up, uploads only what is needed (the dataset in --data, e.g. data/training/v3,
      the two model files, the exp16 + exp15 scripts).
   4. Runs `distill.py all` there in the background and streams its progress here.
-  5. Downloads results (checkpoints, logs, comparers, summary) to experiments/out/exp16_cloud/<run>/.
+  5. Downloads results (checkpoints, logs, comparers, summary) to outputs/exp16-cloud/<run>/.
      Teacher PNGs and the patch bank stay on the server (gigabytes, cheap to regenerate).
   6. ALWAYS destroys the instance at the end: on success, error, Ctrl+C, or the --max-hours limit.
      Destroying (not stopping) is what ends all billing, storage included.
@@ -76,7 +76,7 @@ def main():
     ap.add_argument("--run", default=time.strftime("run_%Y%m%d_%H%M"))
     ap.add_argument("--yes", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--data", default="training", help="dataset folder to upload and train on (e.g. training_v2)")
+    ap.add_argument("--data", default="data/training/v3", help="dataset folder to upload and train on")
     ap.add_argument("--attach", type=int, default=0,
                     help="take over an instance that is already training: watch, download, destroy")
     a, extra = ap.parse_known_args()
@@ -85,7 +85,7 @@ def main():
     UPLOAD.insert(0, a.data)
     for p in UPLOAD:
         if not os.path.exists(p):
-            sys.exit(f"missing {p} (run from the repo root; build training/ with make_dataset.py)")
+            sys.exit(f"missing {p} (run from the repo root; build the dataset with experiments/data/rebuild_datasets.py)")
     try:
         user = vast("show", "user")
         bal = user.get("credit", user.get("balance")) if isinstance(user, dict) else None
@@ -128,7 +128,7 @@ def main():
             sys.exit(f"create failed: {res}")
         print(f"Rented instance {iid}. It will be destroyed when this script ends.", flush=True)
     t_start = time.time(); deadline = t_start + a.max_hours * 3600
-    local_out = os.path.join("experiments", "out", "exp16_cloud", a.run)
+    local_out = os.path.join("outputs", "exp16-cloud", a.run)
     try:
         # wait for running + ssh
         while True:
@@ -153,7 +153,7 @@ def main():
             raise RuntimeError("ssh never came up")
         if a.attach:
             a.run = sh(ssh + [f"ls -t {REMOTE}/runs | head -1"])
-            local_out = os.path.join("experiments", "out", "exp16_cloud", a.run)
+            local_out = os.path.join("outputs", "exp16-cloud", a.run)
             print(f"  watching run {a.run}", flush=True)
         if not a.attach:
             upload_and_start(a, ssh, extra)

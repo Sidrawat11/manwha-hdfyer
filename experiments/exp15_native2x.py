@@ -19,10 +19,10 @@ Our VRAM formula is RRDBNet-only, so on an out-of-memory a page retries at 256, 
 If FP16 produces NaN/inf in a strip (a known risk for attention models) that strip reruns in FP32
 and the page is flagged.
 
-Pages: the same 10 as Exp 14 (experiments/out/exp14_tensorrt/pages.json); page 6 is the rough
+Pages: the same 10 as Exp 14 (outputs/exp14_tensorrt/pages.json); page 6 is the rough
 low-quality source where 4x-UltraSharp smears.
 
-Outputs (experiments/out/exp15_native2x/):
+Outputs (outputs/exp15_native2x/):
   results.jsonl, summary.txt
   compare_pageNN.html   buttons: Original / Today / each model, plus a slider Today vs the last model picked.
                         Opens at actual pixel size ("Fit width" to toggle).
@@ -44,8 +44,8 @@ from tqdm import tqdm
 from common import read_page, detail_scores
 import exp06_split_vs_full as e6
 
-OUT = "experiments/out/exp15_native2x"
-PAGES = "experiments/out/exp14_tensorrt/pages.json"
+OUT = "outputs/exp15_native2x"
+PAGES = "outputs/exp14_tensorrt/pages.json"
 STRIP, OVERLAP = 512, 32
 MODE_NOTE = "All versions are raw output (no sharpening)."
 

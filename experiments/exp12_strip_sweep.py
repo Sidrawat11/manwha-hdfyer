@@ -16,7 +16,7 @@ Batch size per setting = as many strips as fit in 60% of VRAM (max 8); out-of-me
 Quality of each setting is scored against "today" at 2x (raw network output, no sharpening).
 
 Pages: 5 per series from chapters NOT used in the 60-page sample (seed 2027).
-Showcase, per page, in out/exp12_strip_sweep/showcase/:
+Showcase, per page, in outputs/exp12_strip_sweep/showcase/:
   pageNN_full_2x.jpg        the finished 2x page exactly as the pipeline makes it (sharpen + cleanup)
   pageNN_closeup.jpg        most detailed 900-row window: reader-app enlargement | upscaler
 
@@ -31,7 +31,7 @@ import cv2, numpy as np
 from common import page_names, read_page, load_sample, detail_scores
 import exp06_split_vs_full as e6
 
-OUT = "experiments/out/exp12_strip_sweep"
+OUT = "outputs/exp12_strip_sweep"
 SHOW = os.path.join(OUT, "showcase")
 SETTINGS = [("today", 898, 128), ("A", 898, 32), ("B", 512, 32), ("C", 256, 32), ("D", 128, 32)]
 SCALE = 4
@@ -39,8 +39,8 @@ SCALE = 4
 def fresh_pages(per_series=5, seed=2027):
     used = {p["cbz"] for p in load_sample()}
     rng = random.Random(seed); pages = []
-    for series in sorted(os.listdir("Manwhas")):
-        cbzs = [c for c in sorted(glob.glob(os.path.join("Manwhas", series, "*.cbz"))) if c not in used]
+    for series in sorted(os.listdir("data/library")):
+        cbzs = [c for c in sorted(glob.glob(os.path.join("data/library", series, "*.cbz"))) if c not in used]
         for cbz in rng.sample(cbzs, per_series):
             pages.append({"series": series, "cbz": cbz, "page": rng.choice(page_names(cbz))})
     return pages

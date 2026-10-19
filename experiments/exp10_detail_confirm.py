@@ -14,7 +14,7 @@ Recommended on Windows: NVIDIA Control Panel > CUDA - Sysmem Fallback Policy > P
 so a spill becomes a catchable out-of-memory error instead of a silent slowdown.
 
 GPU: python experiments/exp10_detail_confirm.py      (resumable: rerun to continue)
-Stop cleanly between pages: create experiments/out/exp10_detail_confirm/STOP (deleted on next start).
+Stop cleanly between pages: create outputs/exp10_detail_confirm/STOP (deleted on next start).
 """
 import os
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
@@ -24,7 +24,7 @@ sys.path.insert(0, os.getcwd())
 from common import load_sample, read_page, classify_detail
 import exp06_split_vs_full as e6
 
-OUT = "experiments/out/exp10_detail_confirm"
+OUT = "outputs/exp10_detail_confirm"
 MAX_CROPS = 4
 
 def main():

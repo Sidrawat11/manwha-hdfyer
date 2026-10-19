@@ -23,7 +23,7 @@ TILE, MARGIN = 128, 16
 THRESHOLDS = (0.01, 0.015, 0.02, 0.025, 0.03, 0.04)
 FAIL = (14, 18, 32, 35)      # below 0.990 in exp 6
 CLEAN = (39, 23, 26)         # best blended-area scores in exp 6
-OUT = "experiments/out/exp08_detail_detector"
+OUT = "outputs/exp08_detail_detector"
 
 def detail_scores(src):
     gray = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY).astype(np.float32)

@@ -15,10 +15,12 @@ nvidia-smi dmon runs alongside and is saved, so GPU busy/idle can be read per se
 Outputs (no page images): <out>/results.json, <out>/summary.txt, <out>/logs/*.log, <out>/dmon.log
 
 Run from the repo root:
-  python experiments/exp17/bench.py --chapters bench_chapters --out experiments/out/exp17/laptop
-  python experiments/exp17/bench.py --chapters bench_chapters_par --parallel 1,2,4,6,8 --out experiments/out/exp17/par
+  python experiments/exp17/bench.py --chapters data/bench/three-widths --out outputs/exp17-bench/laptop
+  python experiments/exp17/bench.py --chapters data/bench/sixteen --parallel 1,2,4,6,8 --out outputs/exp17-bench/par
 """
 import argparse, json, os, re, shutil, subprocess, sys, time
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from outputs import output_dir
 
 RUN = """
 import sys, time; sys.path.insert(0, '.')
@@ -91,8 +93,8 @@ def pages_in(chapters):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--chapters", default="bench_chapters")
-    ap.add_argument("--out", default="experiments/out/exp17/laptop")
+    ap.add_argument("--chapters", default="data/bench/three-widths")
+    ap.add_argument("--out", default="outputs/exp17-bench/laptop")
     ap.add_argument("--batches", default="1,2,4,8,16")
     ap.add_argument("--workers", default="1,2,4,8,16")
     ap.add_argument("--quick", action="store_true", help="batch 1 and auto only (smoke test)")
@@ -102,7 +104,7 @@ def main():
     a = ap.parse_args()
     global CODE_DIR
     CODE_DIR = os.path.abspath(a.code_dir)
-    os.makedirs(a.out, exist_ok=True)
+    output_dir(a.out, chapters=a.chapters, experiment="exp17 benchmark")
     ncpu = os.cpu_count() or 4
     many = min(16, ncpu)
     gpu = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader"],

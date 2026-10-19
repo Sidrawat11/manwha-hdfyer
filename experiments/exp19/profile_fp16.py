@@ -4,7 +4,7 @@ Exports hdfyer to ONNX exactly as hdfyer/digest/trt.py does (FP16 weights, opset
 1x3x512x800: the strip shape Chapter 134 runs at on the laptop), builds a strongly typed engine with detailed profiling
 metadata, and times every layer with a TensorRT IProfiler. Layers are grouped by the engine inspector's layer type.
 
-  python experiments/exp19/profile_fp16.py      -> experiments/exp19/fp16_layer_profile.csv (+ engine/ONNX in experiments/out/exp19/)
+  python experiments/exp19/profile_fp16.py      -> experiments/exp19/fp16_layer_profile.csv (+ engine/ONNX in outputs/exp19-int8/)
 """
 import copy, csv, json, os, sys
 from collections import defaultdict
@@ -16,7 +16,7 @@ from hdfyer.digest.model import load_student
 
 WEIGHTS = "models/hdfyer/hdfyer-2x-s-r2.pth"
 H, W = 512, 800
-OUT = "experiments/out/exp19"
+OUT = "outputs/exp19-int8"
 CSV = "experiments/exp19/fp16_layer_profile.csv"
 RUNS = 50
 LOGGER = trt.Logger(trt.Logger.WARNING)

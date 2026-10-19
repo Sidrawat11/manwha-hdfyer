@@ -8,7 +8,6 @@ __pycache__/
 .DS_Store
 
 # Manhwa content - never commit
-Manwhas/
 docs/
 
 # GPU profiles in cache/*.json may be committed; built TensorRT engines never
@@ -20,7 +19,6 @@ cache/trt_engines/
 TempExtract/
 upscaled/
 Log/
-test/
 *.log
 
 # Big binaries & weights (we'll handle them separately)
@@ -34,18 +32,14 @@ Real-ESRGAN/experiments/*
 .vscode/
 .idea/
 
-# Experiment outputs
-experiments/out/
-
 # Model weights and downloads
 *.safetensors
 models/janai_dl/
-training*/
-exams/
 
 # Copyrighted pages: never commit, wherever they end up
 *.cbz
 **/compare_page*.html
-bench_chapters/
-bench_chapters_par/
-bench_ch134/
+
+# Inputs (the scanlation library and every dataset built from it) and generated results: never commit
+/data/
+/outputs/

@@ -1,28 +1,24 @@
 """Exp 16: run the unseen-series exam on several series in one go, then write one summary table.
 
-For each series: build exams/<slug>/test.cbz (one random page per chapter, 30 chapters), run the teacher and
-the eval (student vs JaNai, whole-page comparers). Series already examined are skipped (DONE_exam), so it is
-safe to re-run after an interruption. Results:
-  experiments/out/exp16_exam/<slug>_<tag>/            per-series comparers, eval.json, summary.txt
-  experiments/out/exp16_exam/exams_<tag>.csv          one row per series (for the README chart)
+For each series: build data/exams/<label>/test.cbz if it is missing (one random page per chapter, 30 chapters),
+run the teacher and the eval (student vs JaNai, whole-page comparers). Series already examined are skipped
+(DONE_exam), so it is safe to re-run after an interruption. Results:
+  outputs/exp16-exam/<label>_<tag>/            per-series comparers, eval.json, summary.txt
+  outputs/exp16-exam/exams_<tag>.csv           one row per series (for the README chart)
 
 Series names never appear in the repository. They live in two gitignored files on this machine:
-  exams/series.txt          the series folders to examine, one per line (folder names under Manwhas/)
-  exams/series_key.json     {"A": {"style": "Soft pastel, painted", "series": "<series folder>"}, ...}
+  data/exams/series.txt          the series folders to examine, one per line (folder names under data/library/)
+  data/exams/series_key.json     {"A": {"style": "Soft pastel, painted", "series": "<series folder>"}, ...}
 The CSV and everything printed use the anonymous label and style from the key instead of the name.
 
 Run from the repo root (takes ~10 min per series on the laptop, mostly the teacher):
   python experiments/exp16/run_exams.py
 """
-import argparse, csv, json, os, re, subprocess, sys
+import argparse, csv, json, os, subprocess, sys
 
-SERIES_LIST = "exams/series.txt"
-SERIES_KEY = "exams/series_key.json"
-RUN2 = "experiments/out/exp16_cloud/run_20261013_0044/ckpt/final.pth"
-
-
-def slug(s):
-    return re.sub(r"[^a-z0-9]+", "_", s.lower()).strip("_")
+SERIES_LIST = "data/exams/series.txt"
+SERIES_KEY = "data/exams/series_key.json"
+RUN2 = "models/hdfyer/hdfyer-2x-s-r2.pth"   # run 2's final checkpoint
 
 
 def load_series():
@@ -50,14 +46,13 @@ def main():
         series = [s for s in series if labels[s][0] in wanted]
     rows = []
     for i, s in enumerate(series, 1):
-        sl = slug(s)
         label, style = labels[s]
-        out = f"experiments/out/exp16_exam/{sl}_{a.tag}"
+        out = f"outputs/exp16-exam/{label}_{a.tag}"
         print(f"\n===== [{i}/{len(series)}] {label} ({style})", flush=True)
         if not os.path.exists(os.path.join(out, "DONE_exam")):
-            if not os.path.exists(f"exams/{sl}/test.cbz"):
-                subprocess.run([sys.executable, "experiments/exp16/make_dataset.py", "--exam", s], check=True)
-            subprocess.run([sys.executable, "experiments/exp16/distill.py", "exam", "--data", f"exams/{sl}",
+            if not os.path.exists(f"data/exams/{label}/test.cbz"):
+                subprocess.run([sys.executable, "experiments/exp16/make_dataset.py", "--exam", s, "--exam-label", label], check=True)
+            subprocess.run([sys.executable, "experiments/exp16/distill.py", "exam", "--data", f"data/exams/{label}",
                             "--out", out, "--student", a.student], check=True)
         else:
             print("already done, skipping", flush=True)
@@ -71,7 +66,8 @@ def main():
                      "detail_better_pages": sum(r["ssim_student_detail"] > r["ssim_start_detail"] for r in ev if "ssim_student_detail" in r),
                      "student_meandiff": m("meandiff_student"), "janai_meandiff": m("meandiff_start"),
                      "teacher_s_per_page": m("t_today"), "student_s_per_page": m("t_student"), "janai_s_per_page": m("t_start")})
-    path = f"experiments/out/exp16_exam/exams_{a.tag}.csv"
+    os.makedirs("outputs/exp16-exam", exist_ok=True)
+    path = f"outputs/exp16-exam/exams_{a.tag}.csv"
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0])); w.writeheader(); w.writerows(rows)
     print(f"\n{'series':36s} detail student/JaNai  better  | overall student/JaNai | s/page teacher/student")

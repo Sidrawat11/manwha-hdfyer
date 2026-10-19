@@ -3,7 +3,7 @@ full-width tablet comparers: one image at a time, buttons to switch, slider betw
 import base64, glob, os, re
 import cv2
 
-OUT = "experiments/out/exp13_strips_vs_routing"
+OUT = "outputs/exp13_strips_vs_routing"
 TPL = """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Seam check page {n}</title><style>
 :root{{color-scheme:dark}} body{{margin:0;background:#111;color:#ddd;font:15px system-ui,sans-serif}}

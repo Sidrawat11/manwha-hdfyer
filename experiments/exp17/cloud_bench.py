@@ -1,7 +1,7 @@
 """Exp 17 on a rented Vast.ai GPU: rent -> upload code + weights + benchmark chapters -> bench.py -> download -> destroy.
 
 Reuses Exp 16's Vast plumbing (offer search, SSH, always-destroy). Uploads the code as committed
-(git archive HEAD), the hdfyer weights, and the chapters in bench_chapters/ (~120 MB; they live only on the rented
+(git archive HEAD), the hdfyer weights, and the chapters in data/bench/three-widths/ (~120 MB; they live only on the rented
 machine and are deleted with it). TensorRT engines are NOT uploaded: they are tied to the GPU, so the server
 builds its own and the warm-up runs report how long that takes.
 
@@ -12,7 +12,7 @@ Run from the repo root (WSL venv with vastai set up, as for Exp 16):
   python experiments/exp17/cloud_bench.py --dry-run
   python experiments/exp17/cloud_bench.py                       # H200 first, then H100s
   python experiments/exp17/cloud_bench.py --quick               # smoke test: batch 1 + auto only
-  python experiments/exp17/cloud_bench.py --chapters-dir bench_chapters_par --parallel 1,2,4,6,8
+  python experiments/exp17/cloud_bench.py --chapters-dir data/bench/sixteen --parallel 1,2,4,6,8
 """
 import argparse, os, shlex, subprocess, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "exp16"))
@@ -21,10 +21,10 @@ import cloud_run as cr  # sh, vast, write_cloud_info
 IMAGE = "pytorch/pytorch:2.10.0-cuda12.8-cudnn9-runtime"  # same torch as the laptop: nothing big to install, no 2.5.1 shadowing
 REMOTE = "/workspace/m"
 WEIGHTS = "models/hdfyer/hdfyer-2x-s-r2.pth"
-BENCH_DIR = "bench_chapters"  # default --chapters-dir; gitignored: the benchmark chapters as <series>/<chapter>.cbz
+BENCH_DIR = "data/bench/three-widths"  # default --chapters-dir; gitignored: the benchmark chapters as <series label>/<chapter>.cbz
 
 
-def bench_chapters(chapters_dir=BENCH_DIR):
+def find_chapters(chapters_dir=BENCH_DIR):
     out = []
     for root, _, files in os.walk(chapters_dir):
         out += [os.path.join(root, f) for f in sorted(files) if f.endswith(".cbz")]
@@ -70,11 +70,11 @@ def main():
     ap.add_argument("--run", default=time.strftime("bench_%Y%m%d_%H%M"))
     ap.add_argument("--yes", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--chapters-dir", default=BENCH_DIR, help="local folder of benchmark chapters (uploaded as bench_chapters/)")
+    ap.add_argument("--chapters-dir", default=BENCH_DIR, help="local folder of benchmark chapters (uploaded as bench/)")
     ap.add_argument("--parallel", default="", help='passed to bench.py, e.g. "1,2,4,6,8": the --parallel sweep only')
     a = ap.parse_args()
 
-    CHAPTERS = bench_chapters(a.chapters_dir)
+    CHAPTERS = find_chapters(a.chapters_dir)
     if not CHAPTERS:
         sys.exit(f"no chapters in {a.chapters_dir}/ (put chapters of different page widths there)")
     if not os.path.exists(WEIGHTS):
@@ -103,7 +103,7 @@ def main():
         sys.exit(f"create failed: {res}")
     print(f"Rented instance {iid}. It will be destroyed when this script ends.", flush=True)
     t_start = time.time(); deadline = t_start + a.max_hours * 3600
-    local_out = os.path.join("experiments", "out", "exp17", a.run)
+    local_out = os.path.join("outputs", "exp17-bench", a.run)
     try:
         while True:
             info = cr.vast("show", "instance", str(iid), check=False)
@@ -127,7 +127,7 @@ def main():
         print(f"  ssh ok; uploading code (git HEAD), weights and {len(CHAPTERS)} chapters...", flush=True)
         t = time.time()
         ssh_in = [x for x in ssh if x != "-n"]
-        cr.sh(ssh + [f"mkdir -p {REMOTE}/bench_chapters"])
+        cr.sh(ssh + [f"mkdir -p {REMOTE}/bench"])
         git = subprocess.Popen(["git", "archive", "HEAD"], stdout=subprocess.PIPE)
         subprocess.run(ssh_in + [f"tar xf - -C {REMOTE}"], stdin=git.stdout, check=True); git.wait()
         tar = subprocess.Popen(["tar", "cf", "-", WEIGHTS, "experiments/exp17/bench.py"], stdout=subprocess.PIPE)  # bench.py: working copy, may be uncommitted
@@ -142,13 +142,13 @@ def main():
             git_b = subprocess.Popen(["git", "archive", a.compare], stdout=subprocess.PIPE)
             subprocess.run(ssh_in + [f"tar xf - -C {REMOTE}/base"], stdin=git_b.stdout, check=True); git_b.wait()
             cr.sh(ssh + [f"mkdir -p {REMOTE}/base/{os.path.dirname(WEIGHTS)} && ln -sf {REMOTE}/{WEIGHTS} {REMOTE}/base/{WEIGHTS}"])  # link the FILE: models/hdfyer/ already exists there (model card)
-        for c in CHAPTERS:  # flattened into bench_chapters/<series>/<chapter>.cbz
-            dst = f"{REMOTE}/bench_chapters/{shlex.quote(os.path.basename(os.path.dirname(c)))}"
+        for c in CHAPTERS:  # flattened into bench/<series label>/<chapter>.cbz
+            dst = f"{REMOTE}/bench/{shlex.quote(os.path.basename(os.path.dirname(c)))}"
             with open(c, "rb") as f:
                 subprocess.run(ssh_in + [f"mkdir -p {dst} && cat > {dst}/{shlex.quote(os.path.basename(c))}"], stdin=f, check=True)
         print(f"  uploaded in {time.time() - t:.0f}s", flush=True)
 
-        bench_args = (["--chapters", "bench_chapters", "--out", f"runs/{a.run}"] + (["--quick"] if a.quick else [])
+        bench_args = (["--chapters", "bench", "--out", f"runs/{a.run}"] + (["--quick"] if a.quick else [])
                       + (["--parallel", a.parallel] if a.parallel else []))
         # `&` binds to the WHOLE && chain, so the chain is one background shell; its own stdout/stdin must not be the
         # ssh channel, or ssh waits for it to finish (the "stuck at installing" hang of 12-13 Oct).

@@ -69,7 +69,7 @@ The pipeline has three parts: **ingest** (find and read chapters), **digest** (s
 main.py                          command line: parses the flags, calls hdfyer.pipeline.process_all
 hdfyer/pipeline.py               one chapter at a time: load the model, then ingest -> digest -> render per chapter
 hdfyer/parallel.py               --parallel N: warm-up, worker processes, per-process thread limits
-hdfyer/ingest/library.py         which chapters in Manwhas/ still need doing
+hdfyer/ingest/library.py         which chapters in data/library/ still need doing
 hdfyer/ingest/reader.py          CBZ -> decoded pages, and decoding the next chapter ahead
 hdfyer/digest/strips.py          pages -> fixed 512-row strips (anchored last strip, padded short pages)
 hdfyer/digest/batches.py         groups same-shape strips into batches
@@ -81,8 +81,25 @@ hdfyer/digest/stitch.py          collects each page's strips and blends them bac
 hdfyer/render/finish.py          sharpening, black cleanup and JPEG encoding on background threads
 hdfyer/render/package.py         writes the output CBZ (reproducible: fixed timestamps)
 tests/                           tests that need no GPU or model, one file per part; python -m tests.run_all
-experiments/                     numbered experiments behind every change above (see experiments/README.md)
+experiments/                     numbered experiments behind every change above (see experiments/README.md), code only
 ```
+
+### Repository layout
+
+```
+data/                    inputs, gitignored
+  library/               the scanlation originals: the only thing kept as-is
+  training/v3/           the training set, rebuilt from the library by its recipe.json
+  exams/A..E/            the exam sets (one unseen page per chapter, five series) and their manifests
+  bench/                 benchmark chapters, copied from the library by bench/manifest.json
+  teacher/               the teacher model's 2x targets for the training and exam sets
+outputs/<expNN-name>/    everything generated (each run folder has a manifest.json), gitignored
+models/  cache/          weights; GPU profiles and TensorRT engines
+hdfyer/  main.py  tests/ the program and its tests
+experiments/  docs/  assets/
+```
+
+`python experiments/data/rebuild_datasets.py build` rebuilds `data/training/`, `data/exams/` and `data/bench/` from `data/library/`, and `verify` checks them against their recipe and manifests.
 
 ---
 
@@ -91,7 +108,7 @@ experiments/                     numbered experiments behind every change above 
 - **HDFyer smooths film grain and paper texture.** It was trained to minimise the average pixel difference from the target. That rewards a safe average where the target has fine random grain, so grain comes out softer than in the target. The next training run changes the training objective to address this.
 - **The first time a page width is seen costs an engine build** (about a minute on the laptop) plus a few seconds of batch profiling. Both are cached, so it happens once per width per GPU, but a library with many unusual widths pays it several times.
 - **NVIDIA GPU required.** There is no CPU mode. TensorRT is optional; without it the same model runs in plain PyTorch, about 2.3× slower per chapter.
-- **Paths are hard-coded** in `main.py` (`Manwhas/` in, `results/` out).
+- **Paths are hard-coded** in `main.py` (`data/library/` in, `outputs/upscaled/` out).
 
 ---
 
@@ -124,13 +141,13 @@ The experiments that run 4x-UltraSharp also need `models/4x-UltraSharp.pth` from
 
 ## Usage
 
-Put your chapters in `Manwhas/` (any folder structure; every `*.cbz` is found), then:
+Put your chapters in `data/library/` (any folder structure; every `*.cbz` is found), then:
 
 ```bash
 python main.py
 ```
 
-Output goes to `results/`, mirroring the input folders. Chapters already done are skipped, so an interrupted run picks up where it stopped.
+Output goes to `outputs/upscaled/`, mirroring the input folders. Chapters already done are skipped, so an interrupted run picks up where it stopped.
 
 | Flag | Default | What it does |
 |---|---|---|

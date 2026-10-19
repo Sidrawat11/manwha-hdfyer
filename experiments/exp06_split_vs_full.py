@@ -1,6 +1,6 @@
 """Split vs full: does running the network only on line-art regions match the full pipeline?
 
-For every page in experiments/out/sample.json (60 pages, 3 series):
+For every page in outputs/sample.json (60 pages, 3 series):
   FULL    today's pipeline core: chunk_page -> build_batches -> batch_upscale -> reassemble (4x)
   ROUTEDm bicubic 4x base, then network output pasted over every run of edge tiles
           (128px tiles, runs merged horizontally), with an m-pixel context margin (m = 16, 32)
@@ -17,7 +17,7 @@ import cv2, numpy as np
 from common import load_sample, read_page, line_mask, classify_tiles
 
 TILE, SCALE = 128, 4
-OUT = "experiments/out/exp06_split_vs_full"
+OUT = "outputs/exp06_split_vs_full"
 
 
 # ---------------------------------------------------------------- routing

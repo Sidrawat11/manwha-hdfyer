@@ -3,7 +3,7 @@ import glob, json, os, random, zipfile
 import cv2, numpy as np
 
 IMG_EXT = (".jpg", ".jpeg", ".png", ".webp")
-SAMPLE_PATH = "experiments/out/sample.json"
+SAMPLE_PATH = "outputs/sample.json"
 
 def page_names(cbz):
     with zipfile.ZipFile(cbz) as z:
@@ -15,7 +15,7 @@ def read_page(cbz, name):
     with zipfile.ZipFile(cbz) as z:
         return cv2.imdecode(np.frombuffer(z.read(name), np.uint8), cv2.IMREAD_COLOR)
 
-def build_sample(root="Manwhas", per_series=20, seed=2026):
+def build_sample(root="data/library", per_series=20, seed=2026):
     """Random chapter first, then a random page in it; no chapter used twice per series."""
     rng = random.Random(seed)
     sample = []

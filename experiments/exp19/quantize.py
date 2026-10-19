@@ -5,14 +5,16 @@ Q/DQ nodes in the ONNX file; engines are then built strongly typed, like product
 
   1. FP32 ONNX export of hdfyer (the folded weights, same values as production's FP16 export), with the width free so
      one quantized model serves every page width (height fixed at the production strip height, 512).
-  2. Calibration set: 300 strips of 512x800 from the library series in bench_chapters_par/ (not the exam series, which
-     stay unseen; Chapter 134, the speed-test chapter, is left out too). Strips from wider pages are cropped to 800.
+  2. Calibration set: 300 strips of 512x800 from the training-series bench chapters (data/bench/sixteen/L*/; the exam
+     series stay unseen, and chapter 134, the speed-test chapter, is left out too). Strips from wider pages are cropped
+     to 800. Note: the committed results were calibrated before this was fixed, from all 16 bench chapters except
+     chapter 134, which included 5 chapters of exam series A (the chapters exam A's pages come from).
   3. Two variants:  int8-default  ModelOpt's default Q/DQ placement (entropy calibration)
                     int8-mixed    the same, but the first conv, the last conv and the pixel-shuffle stay FP16
 
-ModelOpt lives in experiments/out/exp19/pylib (pip --target, see README): its [onnx] extra pins onnx 1.21, while the
-pipeline uses 1.23.2, so it is kept out of the main environment. Run with:
-  PYTHONPATH=experiments/out/exp19/pylib python experiments/exp19/quantize.py
+ModelOpt lives in outputs/exp19-int8/pylib (pip install --no-deps --target): its [onnx] extra pins onnx 1.21, while
+the pipeline uses 1.23.2, so it is kept out of the main environment. Run with:
+  PYTHONPATH=outputs/exp19-int8/pylib python experiments/exp19/quantize.py
 """
 import copy, glob, os, random, sys, zipfile
 sys.path.insert(0, os.getcwd())
@@ -21,7 +23,7 @@ from tqdm import tqdm
 from hdfyer.digest.model import load_student
 
 WEIGHTS = "models/hdfyer/hdfyer-2x-s-r2.pth"
-OUT = "experiments/out/exp19"
+OUT = "outputs/exp19-int8"
 STRIP, CAL_WIDTH, CAL_STRIPS, SEED = 512, 800, 300, 2031
 EXCLUDE_CHAPTER = "Chapter 134_"
 MIXED_FP16_NODES = ["/conv_1/eval_conv/Conv", "/upsampler/upsampler.0/Conv", "/upsampler/upsampler.1/DepthToSpace"]
@@ -38,7 +40,7 @@ def export_fp32(path):
 def calibration_strips():
     """CAL_STRIPS random 512-row strips (RGB, float32 0-1, NCHW) cut from the library chapters."""
     rng = random.Random(SEED)
-    cbzs = [c for c in sorted(glob.glob("bench_chapters_par/*/*.cbz")) if EXCLUDE_CHAPTER not in c]
+    cbzs = [c for c in sorted(glob.glob("data/bench/sixteen/L*/*.cbz")) if EXCLUDE_CHAPTER not in c]
     candidates = []
     for cbz in cbzs:
         with zipfile.ZipFile(cbz) as z:

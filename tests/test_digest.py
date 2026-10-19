@@ -25,14 +25,14 @@ def round_trip_checks(cbz_path: Path | None = None) -> list[tuple[str, bool]]:
     """Strips + stitching: every real page of a CBZ, a synthetic page, and a sweep of page sizes come back pixel-exact."""
     results = []
     if cbz_path is None:
-        found = sorted(Path("Manwhas").rglob("*.cbz"))
+        found = sorted(Path("data/library").rglob("*.cbz"))
         cbz_path = found[0] if found else None
     small = np.random.default_rng(0).integers(0, 256, (400, 300, 3), dtype=np.uint8)
     cases = [("synthetic 300x400", small)]
     if cbz_path is not None:
         cases += [(name, image) for name, image, _ in extract_images(cbz_path)]
     else:
-        print("  (no CBZ in Manwhas/: real-page cases skipped)")
+        print("  (no CBZ in data/library/: real-page cases skipped)")
 
     print(f"  round trip: {len(cases) - 1} pages from {cbz_path}")
     for name, image in cases:

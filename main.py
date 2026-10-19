@@ -1,4 +1,4 @@
-"""Command line: upscale every chapter in Manwhas/ into results/ with hdfyer. The pipeline lives in hdfyer/."""
+"""Command line: upscale every chapter in data/library/ into outputs/upscaled/ with hdfyer. The pipeline lives in hdfyer/."""
 
 import argparse
 import sys
@@ -20,7 +20,7 @@ def parse_batch(text: str) -> str | int:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Upscale every chapter in Manwhas/ into results/ with hdfyer.")
+    parser = argparse.ArgumentParser(description="Upscale every chapter in data/library/ into outputs/upscaled/ with hdfyer.")
     parser.add_argument("--backend", choices=BACKENDS, default=BACKEND,
                         help="inference runtime: auto is TensorRT if installed, else eager (default: %(default)s)")
     parser.add_argument("--weights", type=Path, default=WEIGHTS, help="hdfyer weights (default: %(default)s)")
@@ -43,7 +43,7 @@ if __name__ == "__main__":
         parser.error(f"hdfyer weights not found: {args.weights}")
 
     try:
-        process_all(Path("Manwhas"), Path("results"), args.weights, backend=args.backend, batch=args.batch,
+        process_all(Path("data/library"), Path("outputs/upscaled"), args.weights, backend=args.backend, batch=args.batch,
                     cpu_workers=args.cpu_workers, max_inflight=args.max_inflight, overlap=not args.no_overlap, parallel=args.parallel)
     except KeyboardInterrupt:
         # The summary has been printed; unfinished chapters are .part files and are redone on the next run.

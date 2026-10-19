@@ -3,8 +3,8 @@ enlarge each 2x separately, recombine, and measure what was lost.
 CPU only. Does not touch the pipeline.
 
 Usage:
-  python experiments/exp01_tapestry.py --random "Manwhas/<series folder>" --out experiments/out
-  python experiments/exp01_tapestry.py --image page.jpg --out experiments/out
+  python experiments/exp01_tapestry.py --random "data/library/<series folder>" --out outputs
+  python experiments/exp01_tapestry.py --image page.jpg --out outputs
 """
 import argparse, glob, os, random, zipfile, json
 import cv2, numpy as np

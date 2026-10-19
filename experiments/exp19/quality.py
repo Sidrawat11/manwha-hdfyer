@@ -13,8 +13,8 @@ Per page, INT8 vs FP16:
                        right or lower neighbour and FP16 has < 1: new banding edges, per megapixel of smooth area
   smooth_grad_ratio    mean |gradient| in smooth regions, INT8 / FP16 (1.0 = equally smooth)
 
-  PYTHONPATH=experiments/out/exp19/pylib python experiments/exp19/quality.py
-    -> experiments/exp19/quality_pages.csv, quality_by_exam.csv; comparers in experiments/out/exp19/
+  PYTHONPATH=outputs/exp19-int8/pylib python experiments/exp19/quality.py
+    -> experiments/exp19/quality_pages.csv, quality_by_exam.csv; comparers in outputs/exp19-int8/
 """
 import csv, glob, json, os, sys, zipfile
 sys.path.insert(0, os.getcwd()); sys.path.insert(0, os.path.join(os.getcwd(), "experiments"))
@@ -28,7 +28,7 @@ import engines
 
 STRIP, SCALE = 512, 2
 PRECISIONS = ["fp16", "int8-default", "int8-mixed"]
-OUT = "experiments/out/exp19"
+OUT = "outputs/exp19-int8"
 
 
 class Runner:
@@ -98,12 +98,9 @@ def compare(ref, test):
 
 
 def exam_pages():
-    key = json.load(open("exams/series_key.json"))
-    label_of = {e["series"]: k for k, e in key.items()}
     out = []
-    for d in sorted(glob.glob("exams/*/")):
-        label = label_of[json.load(open(os.path.join(d, "manifest.json")))["series"]]
-        with zipfile.ZipFile(os.path.join(d, "test.cbz")) as z:
+    for label in sorted(json.load(open("data/exams/series_key.json"))):
+        with zipfile.ZipFile(os.path.join("data", "exams", label, "test.cbz")) as z:
             for name in sorted(z.namelist()):
                 if name.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
                     out.append((label, name, z.read(name)))

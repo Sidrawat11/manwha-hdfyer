@@ -17,7 +17,7 @@ import exp06_split_vs_full as e6
 
 PAGES = [14, 18, 32, 35, 3, 9, 23, 26, 45, 52]
 FAIL = {14, 18, 32, 35}
-OUT = "experiments/out/exp09_detail_gpu"
+OUT = "outputs/exp09_detail_gpu"
 
 def main():
     import torch

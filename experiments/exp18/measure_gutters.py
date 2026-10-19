@@ -9,8 +9,9 @@ the run's median colour. Gradients and texture don't qualify. Each content segme
 either side as context. For comparison, the Exp 4 rule: runs of >= 64 rows that are each flat on their own (spread
 <= 8), even if the colour drifts from row to row.
 
-Sets: bench_chapters_par/ (labelled "library series 1-3" in folder order) and the five exam sets in exams/
-(labelled A-E from exams/series_key.json, which stays local). Series names never appear in the output.
+Sets: the 16 bench chapters in data/bench/sixteen/, one set per series folder there (L1 and L2 are training series,
+A is exam series A: its bench chapters are the chapters exam A's pages come from), and the five exam sets in
+data/exams/A..E (styles from data/exams/series_key.json, which stays local). Series names never appear in the output.
 
   python experiments/exp18/measure_gutters.py          -> experiments/exp18/results.csv
 """
@@ -84,14 +85,12 @@ def exp4_rows(image, tol=8, min_len=MIN_ROWS):
 
 def main():
     sets = []
-    library = sorted({os.path.basename(os.path.dirname(p)) for p in glob.glob("bench_chapters_par/*/*.cbz")})
-    for i, series in enumerate(library):
-        sets.append((f"library series {i + 1}", "", sorted(glob.glob(f"bench_chapters_par/{series}/*.cbz"))))
-    key = json.load(open("exams/series_key.json"))
-    by_series = {entry["series"]: (label, entry["style"]) for label, entry in key.items()}
-    for d in sorted(glob.glob("exams/*/")):
-        label, style = by_series[json.load(open(os.path.join(d, "manifest.json")))["series"]]
-        sets.append((f"exam {label}", style, [os.path.join(d, "test.cbz")]))
+    for folder in sorted(glob.glob("data/bench/sixteen/*/")):
+        label = os.path.basename(os.path.normpath(folder))
+        sets.append((f"bench {label}", "", sorted(glob.glob(os.path.join(folder, "*.cbz")))))
+    key = json.load(open("data/exams/series_key.json"))
+    for label in sorted(key):
+        sets.append((f"exam {label}", key[label]["style"], [os.path.join("data", "exams", label, "test.cbz")]))
     sets.sort(key=lambda s: s[0])
 
     rows = []

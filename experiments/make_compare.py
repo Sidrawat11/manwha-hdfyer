@@ -8,7 +8,7 @@ Self-contained (images embedded), opens in any browser. Rerun any time to pick u
 import base64, glob, os, re
 import cv2
 
-SHOW = "experiments/out/exp12_strip_sweep/showcase"
+SHOW = "outputs/exp12_strip_sweep/showcase"
 TPL = """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Page {n}: reader app vs upscaler</title>

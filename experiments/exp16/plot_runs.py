@@ -1,6 +1,6 @@
 """Exp 16: one ledger + README charts for every distillation run.
 
-Reads every run folder in experiments/out/exp16_cloud/ (train_log.jsonl, eval/eval.json, args.json,
+Reads every run folder in outputs/exp16-cloud/ (train_log.jsonl, eval/eval.json, args.json,
 cloud.json, results.json when present) and writes:
   experiments/exp16/runs.csv            one row per run: setup, cost, best step, test scores, speed
   assets/exp16/val_curve.png            held-out error vs training step (overall and detail), per run
@@ -15,7 +15,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-RUNS = "experiments/out/exp16_cloud"
+RUNS = "outputs/exp16-cloud"
 ASSETS = "assets/exp16"
 LEDGER = "experiments/exp16/runs.csv"
 # validated categorical order (blue, orange, aqua, yellow, ...) on a light surface; text never in series colour
@@ -32,7 +32,9 @@ def load_run(d):
     m = lambda k: sum(r[k] for r in ev if k in r) / max(1, sum(1 for r in ev if k in r))
     best = min((r for r in log if r["step"] > 0), key=lambda r: r["val_l1_levels"], default=None)
     edge = args.get("edge_weight", 0)
-    pages = {"training": 180, "training_v2": 548}.get(os.path.basename(args.get("data", "training")), "?")
+    data = args.get("data", "").rstrip("/")
+    manifest = os.path.join(data, "manifest.json")
+    pages = sum(len(v) for v in json.load(open(manifest))["train"].values()) if os.path.exists(manifest) else "?"
     return {"name": os.path.basename(d), "log": log, "eval": ev, "args": args, "cloud": cloud, "best": best,
             "label": f"{os.path.basename(d)[4:17]}: {pages} pages, {'edge loss' if edge else 'plain L1'}",
             "row": {

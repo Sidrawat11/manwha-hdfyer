@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import load_sample, read_page, classify_detail
 
 TILE, MARGIN = 128, 16
-OUT = "experiments/out/exp11_hybrid_router"
+OUT = "outputs/exp11_hybrid_router"
 
 def today_cost(h, w, strip=898, ov=128):
     if h <= strip: return h * w
@@ -35,7 +35,7 @@ def routed_cost(kinds, w, h):
                 cost += (th + 2 * MARGIN) * (min(run * TILE, w) + 2 * MARGIN); run = 0
     return cost
 
-rows = [json.loads(l) for l in open("experiments/out/exp10_detail_confirm/results.jsonl") if l.strip()]
+rows = [json.loads(l) for l in open("outputs/exp10_detail_confirm/results.jsonl") if l.strip()]
 sample = load_sample()
 for r in rows:
     p = sample[r["i"]]; src = read_page(p["cbz"], p["page"]); h, w = src.shape[:2]

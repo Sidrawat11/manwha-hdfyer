@@ -1,6 +1,6 @@
 """Runs every test group; replaces the old `python test.py`. None of it needs a GPU or the model.
 
-    python -m tests.run_all [path/to/chapter.cbz]   (real-page round trip; defaults to the first CBZ in Manwhas/)
+    python -m tests.run_all [path/to/chapter.cbz]   (real-page round trip; defaults to the first CBZ in data/library/)
 """
 
 import sys

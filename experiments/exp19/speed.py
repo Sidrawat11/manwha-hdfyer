@@ -12,8 +12,8 @@ from pathlib import Path
 from tqdm import tqdm
 
 import glob
-SPEED_CHAPTER = sorted(glob.glob("bench_chapters/*/*Chapter 134_*.cbz"))   # the 34-page, 800 px chapter used throughout
-OUT = Path("experiments/out/exp19/speed"); CSV = "experiments/exp19/speed_runs.csv"
+SPEED_CHAPTER = sorted(glob.glob("data/bench/ch134/*/*.cbz"))   # the 34-page, 800 px chapter used throughout
+OUT = Path("outputs/exp19-int8/speed"); CSV = "experiments/exp19/speed_runs.csv"
 PRECISIONS, ROUNDS, COOL_S, PAGES = ["fp16", "int8-default", "int8-mixed"], 4, 60, 34
 RUN = r'''
 import os, sys, time, re

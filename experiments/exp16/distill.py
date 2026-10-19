@@ -4,7 +4,8 @@ Teacher = 4x-UltraSharp, run in 512-row strips, stitched, Lanczos-halved to 2x: 
           BEFORE sharpening (sharpening stays a separate, tunable step after the model).
 Student = SPAN S 2x, starting from IllustrationJaNai V3detail SPAN weights (it already knows how to
           upscale; we retrain its taste).
-Data    = training/*.cbz (3 x 60 random pages) and training/test.cbz (30 pages, held-out chapters),
+Data    = <data>/train_*.cbz and <data>/test.cbz (30 pages, held-out chapters); the current set is data/training/v3
+          (548 pages from 3 series),
           built by experiments/exp16/make_dataset.py. No chapter is in both.
 
 Stages (each resumable; `all` runs them in order):
@@ -18,15 +19,15 @@ Stages (each resumable; `all` runs them in order):
            the starting JaNai SPAN for reference, per-category similarity, and slider comparers.
   exam     teacher + eval on an UNSEEN series (no training files needed), for any checkpoint:
              python experiments/exp16/make_dataset.py --exam "<series folder>"
-             python experiments/exp16/distill.py exam --data exams/<series slug>
-                 --out experiments/out/exp16_exam/<series slug>_run2
-                 --student experiments/out/exp16_cloud/run_20261013_0044/ckpt/final.pth
+             python experiments/exp16/distill.py exam --data data/exams/A
+                 --out outputs/exp16-exam/A_run2
+                 --student models/hdfyer/hdfyer-2x-s-r2.pth
 
 Self-contained on purpose (torch, spandrel, opencv, numpy, tqdm only) so it runs on a rented GPU
 without the rest of the pipeline. Comparers reuse the Exp 15 page writer.
 
 Local smoke test (few minutes, proves the loop works and the loss goes down):
-  python experiments/exp16/distill.py all --smoke --out experiments/out/exp16_smoke
+  python experiments/exp16/distill.py all --smoke --out outputs/exp16-smoke
 Full run (cloud: see experiments/exp16/cloud_run.py):
   python experiments/exp16/distill.py all --out runs/exp16
 """
@@ -430,8 +431,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("stage", choices=["teacher", "bank", "train", "eval", "all", "exam"],
                     help="exam = teacher + eval only, on <data>/test.cbz (no training files needed); use with --student")
-    ap.add_argument("--data", default="training")
-    ap.add_argument("--out", default="experiments/out/exp16")
+    ap.add_argument("--data", default="data/training/v3")
+    ap.add_argument("--out", default="outputs/exp16-distill")
     ap.add_argument("--teacher", default="models/4x-UltraSharp.pth")
     ap.add_argument("--init", default="models/2x_IllustrationJaNai_V3detail_SPAN_S_40k_fp16.safetensors")
     ap.add_argument("--steps", type=int, default=40000)
