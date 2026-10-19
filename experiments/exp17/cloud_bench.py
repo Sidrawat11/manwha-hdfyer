@@ -15,8 +15,8 @@ Run from the repo root (WSL venv with vastai set up, as for Exp 16):
   python experiments/exp17/cloud_bench.py --chapters-dir data/bench/sixteen --parallel 1,2,4,6,8
 """
 import argparse, os, shlex, subprocess, sys, time
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "exp16"))
-import cloud_run as cr  # sh, vast, write_cloud_info
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "cloud"))
+import vast as cr  # shared Vast.ai helpers: sh, vast, write_cloud_info
 
 IMAGE = "pytorch/pytorch:2.10.0-cuda12.8-cudnn9-runtime"  # same torch as the laptop: nothing big to install, no 2.5.1 shadowing
 REMOTE = "/workspace/m"

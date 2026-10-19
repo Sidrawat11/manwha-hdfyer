@@ -28,6 +28,8 @@ or run `vastai show instances` and `vastai destroy instance <id> -y`. (A contain
 switch its own billing off, so the --max-hours limit is enforced by this script, not by the server.)
 """
 import argparse, json, os, shlex, subprocess, sys, time
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "cloud"))
+from vast import sh, vast, write_cloud_info  # shared Vast.ai helpers
 
 IMAGE = "pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime"
 REMOTE = "/workspace/m"
@@ -35,21 +37,6 @@ INIT = "models/2x_IllustrationJaNai_V3detail_SPAN_S_40k_fp16.safetensors"
 TEACHER = "models/4x-UltraSharp.pth"
 UPLOAD = [TEACHER, INIT, "experiments/exp16", "experiments/exp15_native2x.py",
           "experiments/common.py", "experiments/exp06_split_vs_full.py"]
-
-
-def sh(cmd, check=True, capture=True, timeout=None):
-    r = subprocess.run(cmd, shell=isinstance(cmd, str), capture_output=capture, text=True, timeout=timeout)
-    if check and r.returncode != 0:
-        raise RuntimeError(f"command failed ({r.returncode}): {cmd}\n{r.stdout}\n{r.stderr}")
-    return r.stdout.strip() if capture else ""
-
-
-def vast(*args, check=True):
-    out = sh(["vastai", *args, "--raw"], check=check)
-    try:
-        return json.loads(out)
-    except json.JSONDecodeError:
-        return out
 
 
 def find_offer(gpus, max_dph, disk, geo=""):
@@ -241,14 +228,6 @@ def watch_download(a, ssh, iid, t_start, deadline, dph, local_out):
         pull.wait()
         subprocess.run(ssh + [f"cat {REMOTE}/run.log"], stdout=open(os.path.join(local_out, "run.log"), "w"))
         print("  downloaded.", flush=True)
-
-
-def write_cloud_info(local_out, iid, info, dph, t_start, t_end):
-    os.makedirs(local_out, exist_ok=True)
-    json.dump({"instance": iid, "gpu": info.get("gpu_name"), "geolocation": info.get("geolocation"),
-               "dph": dph, "minutes_watched": round((t_end - t_start) / 60, 1),
-               "cost_usd_approx": round((t_end - t_start) / 3600 * dph, 2),
-               "finished_local": time.strftime("%Y-%m-%d %H:%M")}, open(os.path.join(local_out, "cloud.json"), "w"), indent=1)
 
 
 if __name__ == "__main__":

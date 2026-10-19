@@ -1,0 +1,96 @@
+"""Shared Vast.ai helpers for the cloud jobs (exp16 training, exp17 benchmark, the teacher upscale job).
+
+Renting, waiting for the instance, SSH, and always destroying it. Needs the vastai CLI set up once:
+  pip install vastai && vastai set api-key <key>  (and an SSH key registered with `vastai create ssh-key`)
+"""
+import json, os, subprocess, time
+
+DEFAULT_IMAGE = "pytorch/pytorch:2.10.0-cuda12.8-cudnn9-runtime"
+
+
+def sh(cmd, check=True, capture=True, timeout=None):
+    r = subprocess.run(cmd, shell=isinstance(cmd, str), capture_output=capture, text=True, timeout=timeout)
+    if check and r.returncode != 0:
+        raise RuntimeError(f"command failed ({r.returncode}): {cmd}\n{r.stdout}\n{r.stderr}")
+    return r.stdout.strip() if capture else ""
+
+
+def vast(*args, check=True):
+    out = sh(["vastai", *args, "--raw"], check=check)
+    try:
+        return json.loads(out)
+    except json.JSONDecodeError:
+        return out
+
+
+def credit():
+    user = vast("show", "user")
+    return user.get("credit", user.get("balance")) if isinstance(user, dict) else None
+
+
+def search(query):
+    """Offers matching a Vast query, cheapest first."""
+    offers = vast("search", "offers", query, "-o", "dph_total", check=False)
+    return offers if isinstance(offers, list) else []
+
+
+def rent(offer_id, image, disk_gb, label):
+    res = vast("create", "instance", str(offer_id), "--image", image, "--disk", str(disk_gb), "--ssh", "--direct", "--label", label)
+    iid = res.get("new_contract") if isinstance(res, dict) else None
+    if not iid:
+        raise RuntimeError(f"create failed: {res}")
+    return iid
+
+
+def wait_running(iid, timeout_s=900, on_status=None):
+    start = time.time()
+    while True:
+        info = vast("show", "instance", str(iid), check=False)
+        status = info.get("actual_status") if isinstance(info, dict) else None
+        if on_status:
+            on_status(status)
+        if status == "running":
+            return
+        if time.time() - start > timeout_s:
+            raise RuntimeError(f"instance not running after {timeout_s // 60} min")
+        time.sleep(10)
+
+
+def ssh_command(iid, control_path=None):
+    """The ssh argument list for the instance. With control_path, connections are multiplexed (fast repeated polls)."""
+    userhost, port = sh(["vastai", "ssh-url", str(iid)]).split("://", 1)[1].rsplit(":", 1)
+    cmd = ["ssh", "-p", port, "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+           "-o", "ServerAliveInterval=30", "-o", "LogLevel=ERROR"]
+    if control_path:
+        cmd += ["-o", "ControlMaster=auto", "-o", f"ControlPath={control_path}", "-o", "ControlPersist=600"]
+    return cmd + [userhost]
+
+
+def on_host(ssh, cmd, stdin=False):
+    """The argv that runs cmd on the instance; without stdin, ssh gets -n (it must come before the host)."""
+    return ssh[:-1] + ([] if stdin else ["-n"]) + [ssh[-1], cmd]
+
+
+def wait_ssh(ssh, tries=40):
+    for _ in range(tries):
+        if subprocess.run(on_host(ssh, "true"), capture_output=True).returncode == 0:
+            return
+        time.sleep(10)
+    raise RuntimeError("ssh never came up")
+
+
+def destroy(iid, tries=5):
+    """Destroys (not stops) the instance: that is what ends all billing. Returns True on success."""
+    for _ in range(tries):
+        if subprocess.run(["vastai", "destroy", "instance", str(iid), "-y"], capture_output=True).returncode == 0:
+            return True
+        time.sleep(5)
+    return False
+
+
+def write_cloud_info(local_out, iid, info, dph, t_start, t_end):
+    os.makedirs(local_out, exist_ok=True)
+    json.dump({"instance": iid, "gpu": info.get("gpu_name"), "geolocation": info.get("geolocation"),
+               "dph": dph, "minutes_watched": round((t_end - t_start) / 60, 1),
+               "cost_usd_approx": round((t_end - t_start) / 3600 * dph, 2),
+               "finished_local": time.strftime("%Y-%m-%d %H:%M")}, open(os.path.join(local_out, "cloud.json"), "w"), indent=1)

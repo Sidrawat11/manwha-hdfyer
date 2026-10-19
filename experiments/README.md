@@ -26,3 +26,5 @@ Run everything from the repo root, e.g. `python experiments/exp02_tile_census.py
 
 `common.py` holds the shared sampling, line detector and tile classifier.
 Inputs live in `data/` and generated results in `outputs/<expNN-name>/`, each with a `manifest.json` (both gitignored); `experiments/data/rebuild_datasets.py` rebuilds the datasets from the originals.
+
+`cloud/` holds the rented-GPU jobs: `vast.py` (renting, SSH, always destroying, shared by Exp 16 and 17) and `upscale_teacher.py`, which upscales the training set and the exams with the 4x-UltraSharp teacher into `data/teacher/ultrasharp-2x/` (live progress, `--max-usd`/`--max-hours` caps, resumable; `--smoke` for 10 pages, `--dry-run` to plan without renting).
