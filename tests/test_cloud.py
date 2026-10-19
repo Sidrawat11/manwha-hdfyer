@@ -5,6 +5,7 @@ Path layout, what is left to do or fetch after an interruption, the size estimat
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import zipfile
@@ -79,6 +80,46 @@ def checks() -> list[tuple[str, bool]]:
                    tj.eta_s(25, 100, 50) == 150 and tj.eta_s(0, 100, 50) is None))
     checks.append(("progress: bar and times render", tj.bar(1, 4, 8) == "[##------]  25.0%" and tj.fmt_s(3725) == "1:02:05"
                    and tj.fmt_s(65) == "01:05" and tj.fmt_s(None) == "--:--" and tj.fmt_bytes(6.1e9) == "6.1 GB"))
+
+    import vast
+    script = vast.probe_script()
+    order = [script.find(c) for c in ("bash -lc python", "bash -lc python3", "/opt/conda/bin/python", "/opt/venv/bin/python",
+                                      "/usr/local/bin/python", "which -a python3")]
+    checks.append(("probe: tries a login shell first, then /opt/conda, /opt/venv, /usr/local, then every python3 on PATH",
+                   all(k >= 0 for k in order) and order == sorted(order)))
+    checks.append(("probe: one bash -c script that imports torch and checks CUDA, failing when nothing qualifies",
+                   script.startswith("bash -c '") and "torch.cuda.is_available()" in script and script.endswith("exit 1'")))
+    checks.append(("probe: the parse takes the PYPROBE line of an interpreter with CUDA",
+                   vast.parse_probe("PYTRIED /usr/bin/python3: ModuleNotFoundError\nPYPROBE /opt/conda/bin/python 2.10.0+cu128 True\n")
+                   == ("/opt/conda/bin/python", "2.10.0+cu128")))
+    checks.append(("probe: torch without CUDA, a relative path or no output is not an answer",
+                   vast.parse_probe("PYPROBE /usr/bin/python3 2.10.0 False") is None and vast.parse_probe("PYPROBE python 2.10.0 True") is None
+                   and vast.parse_probe("") is None))
+    checks.append(("probe: the command goes after the host with -n before it",
+                   vast.on_host(["ssh", "-p", "22", "root@h"], "x") == ["ssh", "-p", "22", "-n", "root@h", "x"]))
+
+    with tempfile.TemporaryDirectory() as tmp:  # run the script for real against fake interpreters
+        tmp = Path(tmp)
+        fakes = {"notorch": "echo \"ModuleNotFoundError: No module named 'torch'\" >&2; exit 1",
+                 "nocuda": 'echo "PYPROBE $0 2.10.0 False"', "good": 'echo "PYPROBE $0 2.10.0+cu128 True"'}
+        for name, body in fakes.items():
+            (tmp / name).write_text("#!/bin/sh\n" + body + "\n"); (tmp / name).chmod(0o755)
+        old = vast.PY_LOGIN, vast.PY_PATHS
+        env = {**os.environ, "PATH": "/usr/bin:/bin"}
+        try:
+            vast.PY_LOGIN = ()
+            vast.PY_PATHS = (str(tmp / "missing"), str(tmp / "notorch"), str(tmp / "nocuda"), str(tmp / "good"))
+            r = subprocess.run(["sh", "-c", vast.probe_script()], capture_output=True, text=True, env=env)
+            tried = [l.split(":")[0] for l in r.stdout.splitlines() if l.startswith("PYTRIED")]
+            checks.append(("probe: skips a missing interpreter, one without torch and one without CUDA, picks the first good one",
+                           r.returncode == 0 and vast.parse_probe(r.stdout) == (str(tmp / "good"), "2.10.0+cu128")
+                           and tried == [f"PYTRIED {tmp / n}" for n in ("missing", "notorch", "nocuda")]))
+            vast.PY_PATHS = (str(tmp / "notorch"),)
+            r = subprocess.run(["sh", "-c", vast.probe_script()], capture_output=True, text=True, env=env)
+            checks.append(("probe: with no good interpreter it exits non-zero and says why each failed",
+                           r.returncode == 1 and vast.parse_probe(r.stdout) is None and f"PYTRIED {tmp / 'notorch'}: ModuleNotFoundError" in r.stdout))
+        finally:
+            vast.PY_LOGIN, vast.PY_PATHS = old
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)

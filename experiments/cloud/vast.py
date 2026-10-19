@@ -3,7 +3,7 @@
 Renting, waiting for the instance, SSH, and always destroying it. Needs the vastai CLI set up once:
   pip install vastai && vastai set api-key <key>  (and an SSH key registered with `vastai create ssh-key`)
 """
-import json, os, subprocess, time
+import json, os, shlex, subprocess, time
 
 DEFAULT_IMAGE = "pytorch/pytorch:2.10.0-cuda12.8-cudnn9-runtime"
 
@@ -79,6 +79,46 @@ def wait_ssh(ssh, tries=40):
     raise RuntimeError("ssh never came up")
 
 
+# Where the image's PyTorch might live. Over ssh, a bare `python` can be the OS's own Python (PEP 668, no torch),
+# not the image's interpreter, so the remote side always uses the absolute path find_python returns.
+PY_LOGIN = ("python", "python3")  # tried in a login shell first (it sets up PATH as the image intends)
+PY_PATHS = ("/opt/conda/bin/python", "/opt/venv/bin/python", "/usr/local/bin/python")
+PROBE_PY = "import torch, sys; print('PYPROBE', sys.executable, torch.__version__, torch.cuda.is_available())"
+
+
+def probe_script():
+    """One remote shell script: tries each candidate in order and prints the first `PYPROBE <path> <torch> True` line;
+    for each failure a `PYTRIED <candidate>: <last line of its output>` line, for the error message."""
+    code = shlex.quote(PROBE_PY)
+    tries = [(f"bash -lc {n}", f"bash -lc {shlex.quote(f'{n} -c {code}')}") for n in PY_LOGIN]
+    tries += [(p, f"{p} -c {code}") for p in PY_PATHS]
+    lines = [f'out=$({cmd} 2>&1); case "$out" in *"PYPROBE "*" True"*) echo "$out" | grep "^PYPROBE " | tail -n 1; exit 0;; esac; '
+             f'echo "PYTRIED {label}: $(echo "$out" | tail -n 1)"' for label, cmd in tries]
+    lines.append(f'for p in $(which -a python3 2>/dev/null); do out=$("$p" -c {code} 2>&1); case "$out" in *"PYPROBE "*" True"*) '
+                 f'echo "$out" | grep "^PYPROBE " | tail -n 1; exit 0;; esac; echo "PYTRIED $p: $(echo "$out" | tail -n 1)"; done')
+    lines.append("exit 1")
+    return "bash -c " + shlex.quote("\n".join(lines))
+
+
+def parse_probe(output):
+    """(interpreter path, torch version) from the probe's output, or None if no interpreter had torch with CUDA."""
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) == 4 and parts[0] == "PYPROBE" and parts[3] == "True" and parts[1].startswith("/"):
+            return parts[1], parts[2]
+    return None
+
+
+def find_python(ssh):
+    """The absolute path of the remote interpreter that has torch with CUDA, and its torch version. Raises if none."""
+    r = subprocess.run(on_host(ssh, probe_script()), capture_output=True, text=True, timeout=180)
+    found = parse_probe(r.stdout)
+    if not found:
+        tried = [l for l in (r.stdout + r.stderr).splitlines() if l.strip()]
+        raise RuntimeError("no Python on the instance has torch with CUDA. Tried:\n  " + "\n  ".join(tried or ["(no output)"]))
+    return found
+
+
 def destroy(iid, tries=5):
     """Destroys (not stops) the instance: that is what ends all billing. Returns True on success."""
     for _ in range(tries):
@@ -88,9 +128,9 @@ def destroy(iid, tries=5):
     return False
 
 
-def write_cloud_info(local_out, iid, info, dph, t_start, t_end):
+def write_cloud_info(local_out, iid, info, dph, t_start, t_end, **extra):
     os.makedirs(local_out, exist_ok=True)
-    json.dump({"instance": iid, "gpu": info.get("gpu_name"), "geolocation": info.get("geolocation"),
+    json.dump({**extra, "instance": iid, "gpu": info.get("gpu_name"), "geolocation": info.get("geolocation"),
                "dph": dph, "minutes_watched": round((t_end - t_start) / 60, 1),
                "cost_usd_approx": round((t_end - t_start) / 3600 * dph, 2),
                "finished_local": time.strftime("%Y-%m-%d %H:%M")}, open(os.path.join(local_out, "cloud.json"), "w"), indent=1)

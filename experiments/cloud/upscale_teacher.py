@@ -29,7 +29,7 @@ TRAIN, EXAMS = "data/training/v3", "data/exams"
 MODEL = "models/4x-UltraSharp.pth"
 DISTILL = "experiments/exp16/distill.py"
 REMOTE = "/workspace/m"
-PIP = "python -m pip install -q spandrel==0.4.2 opencv-python-headless numpy tqdm"
+PIP_ARGS = "-m pip install -q spandrel==0.4.2 opencv-python-headless numpy tqdm"  # run with the probed interpreter
 SAMPLE_PAGES = 5
 
 
@@ -376,6 +376,10 @@ def main():
         phase("ssh", "Waiting for SSH…")
         ssh = ticking(live, lambda: vast.ssh_command(iid, control_path=ctl))
         ticking(live, lambda: vast.wait_ssh(ssh))
+        phase("python", "Finding the server's Python with torch…")
+        py, torch_ver = ticking(live, lambda: vast.find_python(ssh))  # absolute path: a bare `python` may be the OS's
+        run.update(python=py, torch=torch_ver)
+        live.log(f"Server Python: {py} (torch {torch_ver}, CUDA available).")
 
         phase("upload", f"Uploading {tj.fmt_bytes(up_bytes)}")
         jobs_file = os.path.join(tempfile.mkdtemp(), "jobs.json")
@@ -387,8 +391,8 @@ def main():
         up_rate = max(5e6, up_bytes / max(1.0, time.time() - t_up))  # download speed guess for the budget reserve
 
         phase("install", "Installing spandrel and OpenCV on the server")
-        ticking(live, lambda: vast.sh(vast.on_host(ssh, f"cd {REMOTE} && {PIP} > pip.log 2>&1 || (tail -n 20 pip.log; exit 1)"), timeout=900))
-        worker = (f"cd {REMOTE} && PYTHONUNBUFFERED=1 python code/teacher_worker.py --jobs jobs.json "
+        ticking(live, lambda: vast.sh(vast.on_host(ssh, f"cd {REMOTE} && {shlex.quote(py)} {PIP_ARGS} > pip.log 2>&1 || (tail -n 20 pip.log; exit 1)"), timeout=900))
+        worker = (f"cd {REMOTE} && PYTHONUNBUFFERED=1 {shlex.quote(py)} code/teacher_worker.py --jobs jobs.json "
                   f"--model models/4x-UltraSharp.pth --out out --batch {a.batch} > worker.log 2>&1")
         subprocess.run(vast.on_host(ssh, f"rm -f {REMOTE}/progress.json && setsid bash -c {shlex.quote(worker)} > /dev/null 2>&1 < /dev/null &"),
                        timeout=60, check=True)
@@ -506,6 +510,7 @@ def write_manifest(out, jobs, model_sha, run):
         "method": "4x model on 512-row strips with 32-row overlap, linear blend; then cv2 INTER_LANCZOS4 to (w//2, h//2); "
                   "PNG compression 1 (distill.py run_model/half)",
         "layout": "training-v3/<series label>/<chapter>/<page>.png, exams/<label>/<page>.png",
+        "python": run.get("python") or old.get("python"), "torch": run.get("torch") or old.get("torch"),
         "page_counts_expected": tj.page_counts(jobs), "page_counts": tj.page_counts(present),
         "bytes": sum(have.get(j["out"], 0) for j in present),
         "minutes_total": round(sum(r.get("minutes", 0) for r in runs), 1),

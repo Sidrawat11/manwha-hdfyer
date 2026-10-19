@@ -32,7 +32,7 @@ def find_chapters(chapters_dir=BENCH_DIR):
 
 
 # Same versions as the laptop (requirements.txt). cu128 wheels need a driver that supports CUDA 12.8.
-PIP = ("python -m pip install -q spandrel==0.4.2 opencv-python-headless numpy imagesize tqdm "
+PIP_ARGS = ("-m pip install -q spandrel==0.4.2 opencv-python-headless numpy imagesize tqdm "
        "tensorrt-cu12==11.4.0.106 onnx==1.23.2 onnxscript")
 ENGINES = "cache/trt_engines"  # engine files are named by GPU model + TensorRT version + model hash: reusable across machines
 
@@ -104,6 +104,7 @@ def main():
     print(f"Rented instance {iid}. It will be destroyed when this script ends.", flush=True)
     t_start = time.time(); deadline = t_start + a.max_hours * 3600
     local_out = os.path.join("outputs", "exp17-bench", a.run)
+    remote_py = {}  # the server's Python with torch, recorded in cloud.json
     try:
         while True:
             info = cr.vast("show", "instance", str(iid), check=False)
@@ -123,6 +124,9 @@ def main():
             time.sleep(10)
         else:
             raise RuntimeError("ssh never came up")
+        py, torch_ver = cr.find_python(ssh)  # absolute path: a bare `python` over ssh may be the OS's, without torch
+        remote_py.update(python=py, torch=torch_ver)
+        print(f"  server Python: {py} (torch {torch_ver})", flush=True)
 
         print(f"  ssh ok; uploading code (git HEAD), weights and {len(CHAPTERS)} chapters...", flush=True)
         t = time.time()
@@ -152,11 +156,11 @@ def main():
                       + (["--parallel", a.parallel] if a.parallel else []))
         # `&` binds to the WHOLE && chain, so the chain is one background shell; its own stdout/stdin must not be the
         # ssh channel, or ssh waits for it to finish (the "stuck at installing" hang of 12-13 Oct).
-        remote_cmd = (f"cd {REMOTE} && setsid nohup bash -c \"({PIP}) > pip.log 2>&1 && "
-                      f"python -c 'import torch, tensorrt, spandrel; print(torch.__version__, tensorrt.__version__, torch.cuda.get_device_name(0))' >> pip.log 2>&1 && "
-                      + (f"PYTHONUNBUFFERED=1 python experiments/exp17/bench.py --code-dir base {' '.join(bench_args).replace(f'runs/{a.run}', f'runs/{a.run}/base')} > run.log 2>&1 && "
+        remote_cmd = (f"cd {REMOTE} && setsid nohup bash -c \"({py} {PIP_ARGS}) > pip.log 2>&1 && "
+                      f"{py} -c 'import torch, tensorrt, spandrel; print(torch.__version__, tensorrt.__version__, torch.cuda.get_device_name(0))' >> pip.log 2>&1 && "
+                      + (f"PYTHONUNBUFFERED=1 {py} experiments/exp17/bench.py --code-dir base {' '.join(bench_args).replace(f'runs/{a.run}', f'runs/{a.run}/base')} > run.log 2>&1 && "
                          if a.compare else "") +  # old code first, so the new run's DONE marks the end of everything
-                      f"PYTHONUNBUFFERED=1 python experiments/exp17/bench.py {' '.join(bench_args)} >> run.log 2>&1\" "
+                      f"PYTHONUNBUFFERED=1 {py} experiments/exp17/bench.py {' '.join(bench_args)} >> run.log 2>&1\" "
                       f"> /dev/null 2>&1 < /dev/null &")
         print("  installing TensorRT 11.4 + small packages on the server (torch 2.10 comes with the image)...", flush=True)
         try:
@@ -166,7 +170,7 @@ def main():
         for _ in range(90):  # install runs in the background now: up to 15 min until bench.py appears
             if subprocess.run(ssh + ["pgrep -f exp17/bench.py"], capture_output=True).returncode == 0:
                 break
-            print("  ...installing: " + cr.sh(ssh + [f"du -sh /opt/conda/lib/python3*/site-packages 2>/dev/null | cut -f1"], check=False), flush=True)
+            print("  ...installing: " + cr.sh(ssh + [f"du -sh $(dirname $(dirname {py}))/lib/python3*/site-packages 2>/dev/null | cut -f1"], check=False), flush=True)
             time.sleep(10)
         else:
             raise RuntimeError("bench did not start:\n" + cr.sh(ssh + [f"tail -n 30 {REMOTE}/pip.log"], check=False))
@@ -213,7 +217,7 @@ def main():
                 break
             time.sleep(5)
         try:
-            cr.write_cloud_info(local_out, iid, offer, dph, t_start, time.time())
+            cr.write_cloud_info(local_out, iid, offer, dph, t_start, time.time(), **remote_py)
         except Exception:
             pass
         hours = (time.time() - t_start) / 3600
