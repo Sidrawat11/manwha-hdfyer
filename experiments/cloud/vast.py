@@ -47,6 +47,9 @@ def rent(offer_id, image, disk_gb, label):
     return iid
 
 
+RUNNING_POLL_S = 10
+
+
 def wait_running(iid, timeout_s=900, on_status=None):
     start = time.time()
     while True:
@@ -58,7 +61,7 @@ def wait_running(iid, timeout_s=900, on_status=None):
             return
         if time.time() - start > timeout_s:
             raise RuntimeError(f"instance not running after {timeout_s // 60} min")
-        time.sleep(10)
+        time.sleep(RUNNING_POLL_S)
 
 
 def ssh_args(userhost, port):
@@ -91,11 +94,17 @@ def ssh_failure(returncode, stderr):
     return lines[-1] if lines else f"ssh exited with {returncode}"
 
 
-def wait_ssh(ssh, tries=40, attempt_timeout=30, pause_s=10, on_fail=None):
+def wait_ssh(ssh, tries=40, attempt_timeout=30, pause_s=10, on_fail=None, max_s=None):
     """Retries `ssh true` until it works. Each attempt is killed after attempt_timeout seconds, so one hung attempt
-    cannot block the wait; on_fail(attempt, reason) is told why each attempt failed."""
-    reason = "no attempt made"
+    cannot block the wait; on_fail(attempt, reason) is told why each attempt failed. With max_s, gives up once that
+    many seconds have passed (each attempt's timeout is cut to fit)."""
+    reason, t0 = "no attempt made", time.time()
     for k in range(1, tries + 1):
+        if max_s is not None:
+            left = max_s - (time.time() - t0)
+            if left <= 0:
+                raise RuntimeError(f"ssh not up after {max_s / 60:.0f} min; last: {reason}")
+            attempt_timeout = min(attempt_timeout, max(1, left))
         try:
             r = subprocess.run(on_host(ssh, "true"), capture_output=True, text=True, timeout=attempt_timeout)
             if r.returncode == 0:
@@ -106,7 +115,7 @@ def wait_ssh(ssh, tries=40, attempt_timeout=30, pause_s=10, on_fail=None):
         if on_fail:
             on_fail(k, reason)
         if k < tries:
-            time.sleep(pause_s)
+            time.sleep(pause_s if max_s is None else max(0, min(pause_s, max_s - (time.time() - t0))))
     raise RuntimeError(f"ssh never came up after {tries} attempts; last: {reason}")
 
 

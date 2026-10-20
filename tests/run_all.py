@@ -5,10 +5,10 @@
 
 import sys
 from pathlib import Path
-from tests import test_cloud, test_digest, test_ingest, test_pipeline, test_render
+from tests import test_cloud, test_digest, test_rotation, test_ingest, test_pipeline, test_render
 
 GROUPS = [("ingest", test_ingest.checks), ("digest", test_digest.checks), ("render", test_render.checks),
-          ("pipeline", test_pipeline.checks), ("cloud", test_cloud.checks)]
+          ("pipeline", test_pipeline.checks), ("cloud", test_cloud.checks), ("rotation", test_rotation.checks)]
 
 
 def main() -> int:
