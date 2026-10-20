@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -141,7 +142,8 @@ def checks() -> list[tuple[str, bool]]:
             vast.PY_LOGIN, vast.PY_PATHS = old
 
         fake_ssh = tmp / "ssh"
-        fake_ssh.write_text('#!/bin/sh\nfor a; do last="$a"; done\nexec sh -c "$last"\n'); fake_ssh.chmod(0o755)
+        # runs the command with bash, like root's login shell on the instance (dash would not show the && ... & hang)
+        fake_ssh.write_text('#!/bin/bash\nfor a; do last="$a"; done\nexec bash -c "$last"\n'); fake_ssh.chmod(0o755)
         for name, torch_after in (("steady", "2.10.0+cu128"), ("swapped", "2.11.0+cu130")):
             (tmp / name).write_text(f'#!/bin/sh\n[ "$1" = "-m" ] && {{ echo "$@" > {tmp}/{name}.pip; exit 0; }}\n'
                                     f'echo "PYCHECK $0 {torch_after} True 0.25.0"\n'); (tmp / name).chmod(0o755)
@@ -155,6 +157,41 @@ def checks() -> list[tuple[str, bool]]:
         except RuntimeError as e:
             msg = str(e)
         checks.append(("install: fails when pip changed torch", "torch changed from 2.10.0+cu128 to 2.11.0+cu130" in msg))
+
+        line = vast.detached_command("python w.py --a 1 > worker.log 2>&1", cwd="/workspace/m")
+        import shlex
+        checks.append(("launch: nothing but the setsid'd shell sits behind the `&` (no `a && b &` chain)",
+                       shlex.split(line) == ["setsid", "nohup", "bash", "-c", "cd /workspace/m && python w.py --a 1 > worker.log 2>&1",
+                                             ">", "/dev/null", "2>&1", "<", "/dev/null", "&"]))
+        checks.append(("launch: the liveness pgrep cannot match the shell running it",
+                       vast.pgrep_command("teacher_worker.py") == "pgrep -f '[t]eacher_worker.py'"))
+        tag = f"fake_worker_{os.getpid()}"
+        (tmp / f"{tag}.sh").write_text("sleep 120\n")
+        (tmp / "progress.json").write_text("{}")
+        ssh = [str(fake_ssh), "host"]
+        t = time.time()
+        vast.start_detached(ssh, f"bash {tag}.sh > worker.log 2>&1", f"{tag}.sh", cwd=str(tmp), before=f"rm -f {tmp}/progress.json")
+        took = time.time() - t
+        alive = subprocess.run(["pgrep", "-f", f"{tag}.sh"], capture_output=True).returncode == 0
+        subprocess.run(["pkill", "-f", f"{tag}.sh"])
+        checks.append(("launch: a worker that runs 120 s starts detached, is seen alive, and the call returns in under 5 s",
+                       took < 5 and alive and not (tmp / "progress.json").exists()))
+        (tmp / f"{tag}_old.sh").write_text("sleep 120\n")
+        try:  # the form that hung the full run: the && chain behind the & keeps ssh's stdout open
+            subprocess.run(ssh[:-1] + ["-n", ssh[-1], f"rm -f {tmp}/x && setsid bash -c 'bash {tmp}/{tag}_old.sh' > /dev/null 2>&1 < /dev/null &"],
+                           capture_output=True, timeout=3); hung = False
+        except subprocess.TimeoutExpired:
+            hung = True
+        subprocess.run(["pkill", "-f", f"{tag}_old.sh"])
+        checks.append(("launch: (the test's own check) the old `rm && setsid ... &` form does hang in the stand-in ssh", hung))
+        (tmp / "dead.log").write_text("Traceback: boom\n")
+        t = time.time()
+        try:
+            vast.start_detached(ssh, "true", f"{tag}_never", cwd=str(tmp), log=str(tmp / "dead.log"), wait_s=1); msg = ""
+        except RuntimeError as e:
+            msg = str(e)
+        checks.append(("launch: a worker that is not running after the wait fails with its log",
+                       "is not running" in msg and "Traceback: boom" in msg and time.time() - t < 5))
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)

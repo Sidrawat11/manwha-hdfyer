@@ -167,6 +167,36 @@ def install_packages(ssh, py, torch_ver, packages=BASE_PACKAGES, log="/workspace
     return check
 
 
+def detached_command(cmd, cwd=None):
+    """The remote line that starts cmd fully detached. Nothing but the setsid'd shell sits behind the `&`: a trailing &
+    after an `a && b` chain backgrounds the whole chain as a subshell that keeps ssh's stdout open until cmd exits."""
+    inner = f"cd {shlex.quote(cwd)} && {cmd}" if cwd else cmd
+    return f"setsid nohup bash -c {shlex.quote(inner)} > /dev/null 2>&1 < /dev/null &"
+
+
+def pgrep_command(pattern):
+    """pgrep -f for pattern that cannot match the remote shell running it (first character in brackets)."""
+    return "pgrep -f " + shlex.quote(f"[{pattern[0]}]{pattern[1:]}")
+
+
+def start_detached(ssh, cmd, match, cwd=None, before=None, log=None, wait_s=10):
+    """Runs `before` (if any) in its own ssh call and waits for it, starts cmd detached, then checks within wait_s
+    seconds that a process matching `match` is running. Raises with the tail of `log` if it is not."""
+    if before:
+        r = subprocess.run(on_host(ssh, before), capture_output=True, text=True, timeout=300)
+        if r.returncode != 0:
+            raise RuntimeError(f"before starting {match}: `{before}` failed:\n{r.stdout}{r.stderr}")
+    subprocess.run(on_host(ssh, detached_command(cmd, cwd)), capture_output=True, timeout=30, check=True)
+    deadline = time.time() + wait_s
+    while True:
+        if subprocess.run(on_host(ssh, pgrep_command(match)), capture_output=True, timeout=30).returncode == 0:
+            return
+        if time.time() > deadline:
+            tail = sh(on_host(ssh, f"tail -n 30 {shlex.quote(log)}"), check=False) if log else ""
+            raise RuntimeError(f"{match} is not running {wait_s} s after launch" + (f"; {log}:\n{tail}" if log else ""))
+        time.sleep(1)
+
+
 def destroy(iid, tries=5):
     """Destroys (not stops) the instance: that is what ends all billing. Returns True on success."""
     for _ in range(tries):

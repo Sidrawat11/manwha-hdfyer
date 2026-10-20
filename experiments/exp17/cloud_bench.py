@@ -155,27 +155,15 @@ def main():
 
         bench_args = (["--chapters", "bench", "--out", f"runs/{a.run}"] + (["--quick"] if a.quick else [])
                       + (["--parallel", a.parallel] if a.parallel else []))
-        # `&` binds to the WHOLE && chain, so the chain is one background shell; its own stdout/stdin must not be the
-        # ssh channel, or ssh waits for it to finish (the "stuck at installing" hang of 12-13 Oct).
         print("  installing TensorRT 11.4 + small packages on the server (torch 2.10 comes with the image)...", flush=True)
         remote_py.update(cr.install_packages(ssh, py, torch_ver, PACKAGES, log=f"{REMOTE}/pip.log"))  # also checks torch is unchanged
         print(f"  installed; torch {remote_py['torch']}, torchvision {remote_py['torchvision']}", flush=True)
-        remote_cmd = (f"cd {REMOTE} && setsid nohup bash -c \""
-                      f"{py} -c 'import torch, tensorrt, spandrel; print(torch.__version__, tensorrt.__version__, torch.cuda.get_device_name(0))' >> pip.log 2>&1 && "
-                      + (f"PYTHONUNBUFFERED=1 {py} experiments/exp17/bench.py --code-dir base {' '.join(bench_args).replace(f'runs/{a.run}', f'runs/{a.run}/base')} > run.log 2>&1 && "
-                         if a.compare else "") +  # old code first, so the new run's DONE marks the end of everything
-                      f"PYTHONUNBUFFERED=1 {py} experiments/exp17/bench.py {' '.join(bench_args)} >> run.log 2>&1\" "
-                      f"> /dev/null 2>&1 < /dev/null &")
-        try:
-            subprocess.run(ssh + [remote_cmd], capture_output=True, text=True, timeout=60)
-        except subprocess.TimeoutExpired:
-            pass
-        for _ in range(18):  # up to 3 min until bench.py appears
-            if subprocess.run(ssh + ["pgrep -f exp17/bench.py"], capture_output=True).returncode == 0:
-                break
-            time.sleep(10)
-        else:
-            raise RuntimeError("bench did not start:\n" + cr.sh(ssh + [f"tail -n 30 {REMOTE}/pip.log"], check=False))
+        bench = ((f"PYTHONUNBUFFERED=1 {py} experiments/exp17/bench.py --code-dir base {' '.join(bench_args).replace(f'runs/{a.run}', f'runs/{a.run}/base')} > run.log 2>&1 && "
+                  if a.compare else "") +  # old code first, so the new run's DONE marks the end of everything
+                 f"PYTHONUNBUFFERED=1 {py} experiments/exp17/bench.py {' '.join(bench_args)} >> run.log 2>&1")
+        cr.start_detached(ssh, bench, "exp17/bench.py", cwd=REMOTE, log=f"{REMOTE}/run.log",
+                          before=f"cd {REMOTE} && {py} -c 'import torch, tensorrt, spandrel; print(torch.__version__, "
+                                 f"tensorrt.__version__, torch.cuda.get_device_name(0))' >> pip.log 2>&1")
         print("  " + cr.sh(ssh + [f"tail -n 1 {REMOTE}/pip.log"], check=False), flush=True)
 
         print("  benchmark running; progress every 30 s (Ctrl+C stops and destroys the instance)", flush=True)
@@ -184,7 +172,7 @@ def main():
             time.sleep(30)
             out = subprocess.run(ssh + [f"cd {REMOTE}; grep -E '^  |^GPU|^Best' run.log | tail -n 2; "
                                         f"test -f runs/{a.run}/DONE && echo __DONE__; "
-                                        f"pgrep -f exp17/bench.py >/dev/null || echo __DEAD__"],
+                                        f"{cr.pgrep_command('exp17/bench.py')} >/dev/null || echo __DEAD__"],
                                  capture_output=True, text=True).stdout
             lines = [l for l in out.splitlines() if not l.startswith("__")]
             if lines and lines[-1] != last:

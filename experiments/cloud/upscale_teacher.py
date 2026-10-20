@@ -393,13 +393,13 @@ def main():
         installed = ticking(live, lambda: vast.install_packages(ssh, py, torch_ver, log=f"{REMOTE}/pip.log"))  # checks torch is unchanged
         run.update(torchvision=installed["torchvision"])
         live.log(f"Installed; torch {installed['torch']} with CUDA unchanged, torchvision {installed['torchvision']}.")
-        worker = (f"cd {REMOTE} && PYTHONUNBUFFERED=1 {shlex.quote(py)} code/teacher_worker.py --jobs jobs.json "
+        worker = (f"PYTHONUNBUFFERED=1 {shlex.quote(py)} code/teacher_worker.py --jobs jobs.json "
                   f"--model models/4x-UltraSharp.pth --out out --batch {a.batch} > worker.log 2>&1")
-        subprocess.run(vast.on_host(ssh, f"rm -f {REMOTE}/progress.json && setsid bash -c {shlex.quote(worker)} > /dev/null 2>&1 < /dev/null &"),
-                       timeout=60, check=True)
+        vast.start_detached(ssh, worker, "teacher_worker.py", cwd=REMOTE, before=f"rm -f {REMOTE}/progress.json",
+                            log=f"{REMOTE}/worker.log")
 
         phase("upscale", "Loading UltraSharp on the server…")
-        poll = vast.on_host(ssh, f"cd {REMOTE}; cat progress.json 2>/dev/null; echo; pgrep -f '[t]eacher_worker.py' > /dev/null && echo ALIVE || echo DEAD")
+        poll = vast.on_host(ssh, f"cd {REMOTE}; cat progress.json 2>/dev/null; echo; {vast.pgrep_command('teacher_worker.py')} > /dev/null && echo ALIVE || echo DEAD")
         t_first, done_first, dead_polls, batch_note = None, 0, 0, None
         try:
             while True:
