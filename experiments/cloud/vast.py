@@ -15,8 +15,8 @@ def sh(cmd, check=True, capture=True, timeout=None):
     return r.stdout.strip() if capture else ""
 
 
-def vast(*args, check=True):
-    out = sh(["vastai", *args, "--raw"], check=check)
+def vast(*args, check=True, timeout=120):
+    out = sh(["vastai", *args, "--raw"], check=check, timeout=timeout)
     try:
         return json.loads(out)
     except json.JSONDecodeError:
@@ -28,10 +28,15 @@ def credit():
     return user.get("credit", user.get("balance")) if isinstance(user, dict) else None
 
 
-def search(query):
-    """Offers matching a Vast query, cheapest first."""
+def search(query, skip_machines=()):
+    """Offers matching a Vast query, cheapest first, without the machines in skip_machines (hosts that failed before)."""
     offers = vast("search", "offers", query, "-o", "dph_total", check=False)
-    return offers if isinstance(offers, list) else []
+    return drop_machines(offers if isinstance(offers, list) else [], skip_machines)
+
+
+def drop_machines(offers, skip_machines):
+    skip = {str(m) for m in skip_machines}
+    return [o for o in offers if str(o.get("machine_id")) not in skip]
 
 
 def rent(offer_id, image, disk_gb, label):
@@ -56,14 +61,23 @@ def wait_running(iid, timeout_s=900, on_status=None):
         time.sleep(10)
 
 
-def ssh_command(iid, control_path=None):
-    """The ssh argument list for the instance. With control_path, connections are multiplexed (fast repeated polls)."""
-    userhost, port = sh(["vastai", "ssh-url", str(iid)]).split("://", 1)[1].rsplit(":", 1)
-    cmd = ["ssh", "-p", port, "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-           "-o", "ServerAliveInterval=30", "-o", "LogLevel=ERROR"]
-    if control_path:
-        cmd += ["-o", "ControlMaster=auto", "-o", f"ControlPath={control_path}", "-o", "ControlPersist=600"]
-    return cmd + [userhost]
+def ssh_args(userhost, port):
+    """Plain ssh to the instance. ConnectTimeout: a dead host fails in 10 s; BatchMode: never prompt for a password or
+    passphrase (a prompt would wait forever); ServerAlive: a connection that dies mid-transfer ends within ~90 s."""
+    return ["ssh", "-p", str(port), "-o", "ConnectTimeout=10", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null", "-o", "ServerAliveInterval=30", "-o", "LogLevel=ERROR", userhost]
+
+
+def ssh_command(iid):
+    """Plain ssh argv for the instance (see ssh_args)."""
+    userhost, port = sh(["vastai", "ssh-url", str(iid)], timeout=120).split("://", 1)[1].rsplit(":", 1)
+    return ssh_args(userhost, port)
+
+
+def with_control(ssh, control_path):
+    """ssh multiplexed over one master connection (fast repeated polls). Only after wait_ssh has succeeded once:
+    a master that hangs while connecting would make every later call hang too."""
+    return ssh[:-1] + ["-o", "ControlMaster=auto", "-o", f"ControlPath={control_path}", "-o", "ControlPersist=600", ssh[-1]]
 
 
 def on_host(ssh, cmd, stdin=False):
@@ -71,12 +85,29 @@ def on_host(ssh, cmd, stdin=False):
     return ssh[:-1] + ([] if stdin else ["-n"]) + [ssh[-1], cmd]
 
 
-def wait_ssh(ssh, tries=40):
-    for _ in range(tries):
-        if subprocess.run(on_host(ssh, "true"), capture_output=True).returncode == 0:
-            return
-        time.sleep(10)
-    raise RuntimeError("ssh never came up")
+def ssh_failure(returncode, stderr):
+    """The reason a probe failed, for the live view: ssh's last stderr line, e.g. "Permission denied (publickey)."."""
+    lines = [l.strip() for l in (stderr or "").splitlines() if l.strip()]
+    return lines[-1] if lines else f"ssh exited with {returncode}"
+
+
+def wait_ssh(ssh, tries=40, attempt_timeout=30, pause_s=10, on_fail=None):
+    """Retries `ssh true` until it works. Each attempt is killed after attempt_timeout seconds, so one hung attempt
+    cannot block the wait; on_fail(attempt, reason) is told why each attempt failed."""
+    reason = "no attempt made"
+    for k in range(1, tries + 1):
+        try:
+            r = subprocess.run(on_host(ssh, "true"), capture_output=True, text=True, timeout=attempt_timeout)
+            if r.returncode == 0:
+                return
+            reason = ssh_failure(r.returncode, r.stderr)
+        except subprocess.TimeoutExpired:
+            reason = f"no answer within {attempt_timeout} s"
+        if on_fail:
+            on_fail(k, reason)
+        if k < tries:
+            time.sleep(pause_s)
+    raise RuntimeError(f"ssh never came up after {tries} attempts; last: {reason}")
 
 
 # Where the image's PyTorch might live. Over ssh, a bare `python` can be the OS's own Python (PEP 668, no torch),
@@ -192,7 +223,7 @@ def start_detached(ssh, cmd, match, cwd=None, before=None, log=None, wait_s=10):
         if subprocess.run(on_host(ssh, pgrep_command(match)), capture_output=True, timeout=30).returncode == 0:
             return
         if time.time() > deadline:
-            tail = sh(on_host(ssh, f"tail -n 30 {shlex.quote(log)}"), check=False) if log else ""
+            tail = sh(on_host(ssh, f"tail -n 30 {shlex.quote(log)}"), check=False, timeout=60) if log else ""
             raise RuntimeError(f"{match} is not running {wait_s} s after launch" + (f"; {log}:\n{tail}" if log else ""))
         time.sleep(1)
 
@@ -200,8 +231,11 @@ def start_detached(ssh, cmd, match, cwd=None, before=None, log=None, wait_s=10):
 def destroy(iid, tries=5):
     """Destroys (not stops) the instance: that is what ends all billing. Returns True on success."""
     for _ in range(tries):
-        if subprocess.run(["vastai", "destroy", "instance", str(iid), "-y"], capture_output=True).returncode == 0:
-            return True
+        try:
+            if subprocess.run(["vastai", "destroy", "instance", str(iid), "-y"], capture_output=True, timeout=60).returncode == 0:
+                return True
+        except subprocess.TimeoutExpired:
+            pass
         time.sleep(5)
     return False
 

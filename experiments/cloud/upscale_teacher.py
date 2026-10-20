@@ -249,7 +249,8 @@ def upload(ssh, files, on_bytes):
 
 
 def remote_sizes(ssh):
-    out = vast.sh(vast.on_host(ssh, f"cd {REMOTE}/out 2>/dev/null && find . -name '*.png' ! -name '*.tmp.png' -printf '%s %P\\n'"), check=False)
+    out = vast.sh(vast.on_host(ssh, f"cd {REMOTE}/out 2>/dev/null && find . -name '*.png' ! -name '*.tmp.png' -printf '%s %P\\n'"), check=False,
+                  timeout=300)
     sizes = {}
     for line in out.splitlines():
         n, p = line.split(" ", 1)
@@ -259,7 +260,7 @@ def remote_sizes(ssh):
 
 def download(ssh, paths, out, on_bytes):
     """Fetches the given output paths as a tar stream; each file is written to a temp name and renamed when complete."""
-    subprocess.run(vast.on_host(ssh, f"cat > {REMOTE}/fetch.txt", stdin=True), input="\n".join(paths).encode(), check=True)
+    subprocess.run(vast.on_host(ssh, f"cat > {REMOTE}/fetch.txt", stdin=True), input="\n".join(paths).encode(), check=True, timeout=120)
     p = subprocess.Popen(vast.on_host(ssh, f"cd {REMOTE}/out && tar cf - -T ../fetch.txt"), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     got = 0
     try:
@@ -290,6 +291,8 @@ def main():
     ap.add_argument("--max-usd", type=float, default=10.0, help="hard spend cap for the whole job")
     ap.add_argument("--max-hours", type=float, default=3.0, help="hard time cap for the whole job")
     ap.add_argument("--geo", default="", help="country code filter, e.g. US")
+    ap.add_argument("--skip-machine", action="append", default=[], metavar="ID",
+                    help="never rent this Vast machine id (repeatable), e.g. a host whose SSH never came up")
     ap.add_argument("--batch", choices=["auto", "on", "off"], default="auto",
                     help="strip batching: auto = used only if within 1 level of the unbatched path on the first 5 pages")
     ap.add_argument("--image", default=vast.DEFAULT_IMAGE)
@@ -333,14 +336,14 @@ def main():
         q = (f"gpu_name={g} num_gpus=1 verified=true rentable=true direct_port_count>=1 reliability>0.98 "
              f"inet_down>=300 inet_up>=200 disk_space>={disk} dph_total<={a.max_dph} cuda_max_good>=12.8 cpu_ram>=32"
              + (f" geolocation={a.geo}" if a.geo else ""))
-        offers = vast.search(q)
+        offers = vast.search(q, a.skip_machine)
         if offers:
             offer = offers[0]; break
         print(f"  no {g} under ${a.max_dph}/h right now")
     if not offer:
         sys.exit("No offer matched; try --max-dph or --gpus.")
     dph = float(offer["dph_total"])
-    print(f"Offer: {offer['gpu_name']} at ${dph:.2f}/h in {offer.get('geolocation', '?')}, {disk} GB disk. "
+    print(f"Offer: {offer['gpu_name']} at ${dph:.2f}/h in {offer.get('geolocation', '?')} (machine {offer.get('machine_id', '?')}), {disk} GB disk. "
           f"Caps: ${a.max_usd:.2f}, {a.max_hours} h (about {a.max_usd / dph:.1f} h at this price).")
     if not a.yes and input("Rent it? [y/N] ").strip().lower() != "y":
         return
@@ -348,7 +351,8 @@ def main():
     live = Live(a.max_usd, min(a.max_hours, 1e9))
     live.dph, live.gpu = dph, offer["gpu_name"]
     phases, run = {}, {"date": time.strftime("%Y-%m-%d %H:%M"), "smoke": a.smoke, "gpu": offer["gpu_name"], "dph": dph,
-                       "geolocation": offer.get("geolocation"), "image": a.image, "pages_requested": len(todo)}
+                       "geolocation": offer.get("geolocation"), "machine_id": offer.get("machine_id"), "image": a.image,
+                       "pages_requested": len(todo)}
     t_phase = [time.time(), None]
 
     def phase(name, text):
@@ -369,12 +373,16 @@ def main():
         phase("rent", f"Renting {offer['gpu_name']}…")
         iid = vast.rent(offer["id"], a.image, disk, "hdfyer-teacher")
         live.t_bill = time.time(); run["instance"] = iid
-        live.log(f"Rented instance {iid}. It is destroyed when this script ends, however it ends.")
+        live.log(f"Rented instance {iid} on machine {offer.get('machine_id', '?')}. It is destroyed when this script ends, however it ends.")
         phase("start", "Waiting for the instance to start…")
         ticking(live, lambda: vast.wait_running(iid, on_status=lambda s: live.set(f"Waiting for the instance to start… ({s or 'loading'})")))
         phase("ssh", "Waiting for SSH…")
-        ssh = ticking(live, lambda: vast.ssh_command(iid, control_path=ctl))
-        ticking(live, lambda: vast.wait_ssh(ssh))
+        plain = ticking(live, lambda: vast.ssh_command(iid))
+        try:  # plain ssh, each attempt killed after 30 s; the live view says why an attempt failed
+            ticking(live, lambda: vast.wait_ssh(plain, on_fail=lambda k, why: live.set(f"Waiting for SSH… attempt {k} failed: {why}")))
+        except RuntimeError as e:
+            raise RuntimeError(f"{str(e).rstrip('.')}. Retry with --skip-machine {offer.get('machine_id', '?')} to avoid this host.") from None
+        ssh = vast.with_control(plain, ctl)  # multiplexed only now that a connection is known to work
         phase("python", "Finding the server's Python with torch…")
         py, torch_ver = ticking(live, lambda: vast.find_python(ssh))  # absolute path: a bare `python` may be the OS's
         run.update(python=py, torch=torch_ver)
@@ -440,7 +448,7 @@ def main():
                 if not alive:
                     dead_polls += 1
                     if dead_polls >= 3:
-                        error = "worker died:\n" + vast.sh(vast.on_host(ssh, f"tail -n 30 {REMOTE}/worker.log"), check=False)
+                        error = "worker died:\n" + vast.sh(vast.on_host(ssh, f"tail -n 30 {REMOTE}/worker.log"), check=False, timeout=60)
                         live.log(error); break
                 else:
                     dead_polls = 0
@@ -489,8 +497,11 @@ def main():
             live.start(f"Destroying instance {iid}… (Ctrl+C is ignored until it is gone)")
             ok = vast.destroy(iid)
             live.t_end = time.time()  # the clock stops with the instance
-            if ssh:
-                subprocess.run(ssh[:-1] + ["-O", "exit", ssh[-1]], capture_output=True)
+            if ssh:  # close the multiplexing master
+                try:
+                    subprocess.run(ssh[:-1] + ["-O", "exit", ssh[-1]], capture_output=True, timeout=30)
+                except subprocess.TimeoutExpired:
+                    pass
             minutes = live.billed_s() / 60
             run.update({"minutes": round(minutes, 1), "cost_usd": round(live.spent(), 2), "phase_seconds": phases,
                         "stopped_by": stopped_by, "error": error, "destroyed": ok})

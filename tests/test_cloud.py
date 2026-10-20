@@ -158,6 +158,40 @@ def checks() -> list[tuple[str, bool]]:
             msg = str(e)
         checks.append(("install: fails when pip changed torch", "torch changed from 2.10.0+cu128 to 2.11.0+cu130" in msg))
 
+        args = vast.ssh_args("root@h", 2222)
+        opts = [args[k + 1] for k, a in enumerate(args) if a == "-o"]
+        checks.append(("ssh: ConnectTimeout=10 and BatchMode=yes, no multiplexing on the plain command, host last",
+                       "ConnectTimeout=10" in opts and "BatchMode=yes" in opts and not any(o.startswith("Control") for o in opts)
+                       and args[-1] == "root@h" and args[args.index("-p") + 1] == "2222"))
+        muxed = vast.with_control(args, "/tmp/c-%C")
+        checks.append(("ssh: multiplexing options are added before the host", muxed[-1] == "root@h" and "ControlPath=/tmp/c-%C" in muxed
+                       and muxed[:len(args) - 1] == args[:-1]))
+        checks.append(("ssh: a failed attempt is explained by ssh's last stderr line",
+                       vast.ssh_failure(255, "Warning: x\nroot@h: Permission denied (publickey).\n") == "root@h: Permission denied (publickey)."
+                       and vast.ssh_failure(255, "") == "ssh exited with 255"))
+        checks.append(("--skip-machine: offers on skipped machines are dropped, ids as text or numbers",
+                       [o["id"] for o in vast.drop_machines([{"id": 1, "machine_id": 7}, {"id": 2, "machine_id": 8}, {"id": 3}], ["7"])] == [2, 3]))
+        hang = tmp / "ssh_hang"
+        hang.write_text(f'#!/bin/bash\nn=$(cat {tmp}/cnt 2>/dev/null || echo 0); echo $((n+1)) > {tmp}/cnt\n'
+                        f'[ "$n" -lt 2 ] && exec sleep 100\nexit 0\n'); hang.chmod(0o755)
+        fails, t = [], time.time()
+        try:
+            vast.wait_ssh([str(hang), "host"], tries=5, attempt_timeout=1, pause_s=0, on_fail=lambda k, why: fails.append((k, why))); came_up = True
+        except RuntimeError:
+            came_up = False
+        checks.append(("ssh: a hanging attempt is killed after its timeout and retried; the third attempt connects",
+                       came_up and fails == [(1, "no answer within 1 s"), (2, "no answer within 1 s")] and time.time() - t < 5
+                       and (tmp / "cnt").read_text().strip() == "3"))
+        denied = tmp / "ssh_denied"
+        denied.write_text('#!/bin/bash\necho "root@h: Permission denied (publickey)." >&2\nexit 255\n'); denied.chmod(0o755)
+        fails = []
+        try:
+            vast.wait_ssh([str(denied), "host"], tries=2, attempt_timeout=5, pause_s=0, on_fail=lambda k, why: fails.append(why)); msg = ""
+        except RuntimeError as e:
+            msg = str(e)
+        checks.append(("ssh: a host that never lets us in fails after the tries, saying why",
+                       fails == ["root@h: Permission denied (publickey)."] * 2 and "Permission denied (publickey)" in msg))
+
         line = vast.detached_command("python w.py --a 1 > worker.log 2>&1", cwd="/workspace/m")
         import shlex
         checks.append(("launch: nothing but the setsid'd shell sits behind the `&` (no `a && b &` chain)",
