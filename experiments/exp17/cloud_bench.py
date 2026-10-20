@@ -32,8 +32,9 @@ def find_chapters(chapters_dir=BENCH_DIR):
 
 
 # Same versions as the laptop (requirements.txt). cu128 wheels need a driver that supports CUDA 12.8.
-PIP_ARGS = ("-m pip install -q spandrel==0.4.2 opencv-python-headless numpy imagesize tqdm "
-       "tensorrt-cu12==11.4.0.106 onnx==1.23.2 onnxscript")
+# Installed with --no-deps (vast.install_packages), so their own dependencies are listed too.
+PACKAGES = cr.BASE_PACKAGES + ("imagesize", "tensorrt-cu12==11.4.0.106", "tensorrt_cu12_libs==11.4.0.106",
+                               "tensorrt_cu12_bindings==11.4.0.106", "onnx==1.23.2", "protobuf", "ml_dtypes", "onnxscript", "onnx_ir")
 ENGINES = "cache/trt_engines"  # engine files are named by GPU model + TensorRT version + model hash: reusable across machines
 
 
@@ -156,21 +157,22 @@ def main():
                       + (["--parallel", a.parallel] if a.parallel else []))
         # `&` binds to the WHOLE && chain, so the chain is one background shell; its own stdout/stdin must not be the
         # ssh channel, or ssh waits for it to finish (the "stuck at installing" hang of 12-13 Oct).
-        remote_cmd = (f"cd {REMOTE} && setsid nohup bash -c \"({py} {PIP_ARGS}) > pip.log 2>&1 && "
+        print("  installing TensorRT 11.4 + small packages on the server (torch 2.10 comes with the image)...", flush=True)
+        remote_py.update(cr.install_packages(ssh, py, torch_ver, PACKAGES, log=f"{REMOTE}/pip.log"))  # also checks torch is unchanged
+        print(f"  installed; torch {remote_py['torch']}, torchvision {remote_py['torchvision']}", flush=True)
+        remote_cmd = (f"cd {REMOTE} && setsid nohup bash -c \""
                       f"{py} -c 'import torch, tensorrt, spandrel; print(torch.__version__, tensorrt.__version__, torch.cuda.get_device_name(0))' >> pip.log 2>&1 && "
                       + (f"PYTHONUNBUFFERED=1 {py} experiments/exp17/bench.py --code-dir base {' '.join(bench_args).replace(f'runs/{a.run}', f'runs/{a.run}/base')} > run.log 2>&1 && "
                          if a.compare else "") +  # old code first, so the new run's DONE marks the end of everything
                       f"PYTHONUNBUFFERED=1 {py} experiments/exp17/bench.py {' '.join(bench_args)} >> run.log 2>&1\" "
                       f"> /dev/null 2>&1 < /dev/null &")
-        print("  installing TensorRT 11.4 + small packages on the server (torch 2.10 comes with the image)...", flush=True)
         try:
             subprocess.run(ssh + [remote_cmd], capture_output=True, text=True, timeout=60)
         except subprocess.TimeoutExpired:
             pass
-        for _ in range(90):  # install runs in the background now: up to 15 min until bench.py appears
+        for _ in range(18):  # up to 3 min until bench.py appears
             if subprocess.run(ssh + ["pgrep -f exp17/bench.py"], capture_output=True).returncode == 0:
                 break
-            print("  ...installing: " + cr.sh(ssh + [f"du -sh $(dirname $(dirname {py}))/lib/python3*/site-packages 2>/dev/null | cut -f1"], check=False), flush=True)
             time.sleep(10)
         else:
             raise RuntimeError("bench did not start:\n" + cr.sh(ssh + [f"tail -n 30 {REMOTE}/pip.log"], check=False))

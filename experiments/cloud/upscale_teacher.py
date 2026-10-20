@@ -29,7 +29,6 @@ TRAIN, EXAMS = "data/training/v3", "data/exams"
 MODEL = "models/4x-UltraSharp.pth"
 DISTILL = "experiments/exp16/distill.py"
 REMOTE = "/workspace/m"
-PIP_ARGS = "-m pip install -q spandrel==0.4.2 opencv-python-headless numpy tqdm"  # run with the probed interpreter
 SAMPLE_PAGES = 5
 
 
@@ -391,7 +390,9 @@ def main():
         up_rate = max(5e6, up_bytes / max(1.0, time.time() - t_up))  # download speed guess for the budget reserve
 
         phase("install", "Installing spandrel and OpenCV on the server")
-        ticking(live, lambda: vast.sh(vast.on_host(ssh, f"cd {REMOTE} && {shlex.quote(py)} {PIP_ARGS} > pip.log 2>&1 || (tail -n 20 pip.log; exit 1)"), timeout=900))
+        installed = ticking(live, lambda: vast.install_packages(ssh, py, torch_ver, log=f"{REMOTE}/pip.log"))  # checks torch is unchanged
+        run.update(torchvision=installed["torchvision"])
+        live.log(f"Installed; torch {installed['torch']} with CUDA unchanged, torchvision {installed['torchvision']}.")
         worker = (f"cd {REMOTE} && PYTHONUNBUFFERED=1 {shlex.quote(py)} code/teacher_worker.py --jobs jobs.json "
                   f"--model models/4x-UltraSharp.pth --out out --batch {a.batch} > worker.log 2>&1")
         subprocess.run(vast.on_host(ssh, f"rm -f {REMOTE}/progress.json && setsid bash -c {shlex.quote(worker)} > /dev/null 2>&1 < /dev/null &"),
@@ -511,6 +512,7 @@ def write_manifest(out, jobs, model_sha, run):
                   "PNG compression 1 (distill.py run_model/half)",
         "layout": "training-v3/<series label>/<chapter>/<page>.png, exams/<label>/<page>.png",
         "python": run.get("python") or old.get("python"), "torch": run.get("torch") or old.get("torch"),
+        "torchvision": run.get("torchvision") or old.get("torchvision"),
         "page_counts_expected": tj.page_counts(jobs), "page_counts": tj.page_counts(present),
         "bytes": sum(have.get(j["out"], 0) for j in present),
         "minutes_total": round(sum(r.get("minutes", 0) for r in runs), 1),

@@ -98,6 +98,25 @@ def checks() -> list[tuple[str, bool]]:
     checks.append(("probe: the command goes after the host with -n before it",
                    vast.on_host(["ssh", "-p", "22", "root@h"], "x") == ["ssh", "-p", "22", "-n", "root@h", "x"]))
 
+    pip = vast.pip_command("/usr/bin/python", vast.BASE_PACKAGES)
+    checks.append(("install: pip runs with the probed interpreter, --no-deps and --break-system-packages (PEP 668 system Python)",
+                   pip.startswith("/usr/bin/python -m pip install -q --no-deps --break-system-packages ")))
+    checks.append(("install: spandrel 0.4.2 and the pieces it needs beyond the image; never torch, torchvision or numpy",
+                   pip.split("--break-system-packages ")[1].split() == ["spandrel==0.4.2", "einops", "safetensors", "typing_extensions",
+                                                                       "opencv-python-headless", "tqdm"]
+                   and not any(p.split("=")[0] in ("torch", "torchvision", "numpy") for p in vast.BASE_PACKAGES)))
+    checks.append(("install: an interpreter path with a space is quoted", vast.pip_command("/opt/my py/python", ["tqdm"]).startswith("'/opt/my py/python' -m pip")))
+    after = vast.parse_check("Warning: x\nPYCHECK /usr/bin/python 2.10.0+cu128 True 0.25.0+cu128\n")
+    checks.append(("install: the re-check reads python, torch, CUDA and torchvision",
+                   after == {"python": "/usr/bin/python", "torch": "2.10.0+cu128", "cuda": True, "torchvision": "0.25.0+cu128"}))
+    checks.append(("install: same torch with CUDA passes", vast.install_problem("/usr/bin/python", "2.10.0+cu128", after) is None))
+    checks.append(("install: a changed torch version fails",
+                   "changed" in (vast.install_problem("/usr/bin/python", "2.9.1+cu128", after) or "")))
+    checks.append(("install: CUDA lost fails", "CUDA" in (vast.install_problem("/usr/bin/python", "2.10.0+cu128", {**after, "cuda": False}) or "")))
+    checks.append(("install: torchvision (or torch) not importing fails",
+                   vast.parse_check("ModuleNotFoundError: No module named 'torchvision'") is None
+                   and vast.install_problem("/usr/bin/python", "2.10.0+cu128", None) is not None))
+
     with tempfile.TemporaryDirectory() as tmp:  # run the script for real against fake interpreters
         tmp = Path(tmp)
         fakes = {"notorch": "echo \"ModuleNotFoundError: No module named 'torch'\" >&2; exit 1",
@@ -120,6 +139,22 @@ def checks() -> list[tuple[str, bool]]:
                            r.returncode == 1 and vast.parse_probe(r.stdout) is None and f"PYTRIED {tmp / 'notorch'}: ModuleNotFoundError" in r.stdout))
         finally:
             vast.PY_LOGIN, vast.PY_PATHS = old
+
+        fake_ssh = tmp / "ssh"
+        fake_ssh.write_text('#!/bin/sh\nfor a; do last="$a"; done\nexec sh -c "$last"\n'); fake_ssh.chmod(0o755)
+        for name, torch_after in (("steady", "2.10.0+cu128"), ("swapped", "2.11.0+cu130")):
+            (tmp / name).write_text(f'#!/bin/sh\n[ "$1" = "-m" ] && {{ echo "$@" > {tmp}/{name}.pip; exit 0; }}\n'
+                                    f'echo "PYCHECK $0 {torch_after} True 0.25.0"\n'); (tmp / name).chmod(0o755)
+        got = vast.install_packages([str(fake_ssh), "host"], str(tmp / "steady"), "2.10.0+cu128", log=str(tmp / "pip.log"))
+        pip_args = (tmp / "steady.pip").read_text().split()
+        checks.append(("install: runs pip on the instance with --no-deps, then reports torch and torchvision",
+                       got == {"python": str(tmp / "steady"), "torch": "2.10.0+cu128", "cuda": True, "torchvision": "0.25.0"}
+                       and pip_args[:5] == ["-m", "pip", "install", "-q", "--no-deps"] and "spandrel==0.4.2" in pip_args))
+        try:
+            vast.install_packages([str(fake_ssh), "host"], str(tmp / "swapped"), "2.10.0+cu128", log=str(tmp / "pip.log")); msg = ""
+        except RuntimeError as e:
+            msg = str(e)
+        checks.append(("install: fails when pip changed torch", "torch changed from 2.10.0+cu128 to 2.11.0+cu130" in msg))
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)

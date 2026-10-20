@@ -29,7 +29,7 @@ switch its own billing off, so the --max-hours limit is enforced by this script,
 """
 import argparse, json, os, shlex, subprocess, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "cloud"))
-from vast import find_python, sh, vast, write_cloud_info  # shared Vast.ai helpers
+from vast import find_python, install_packages, sh, vast, write_cloud_info  # shared Vast.ai helpers
 
 IMAGE = "pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime"
 REMOTE = "/workspace/m"
@@ -147,7 +147,7 @@ def main():
             local_out = os.path.join("outputs", "exp16-cloud", a.run)
             print(f"  watching run {a.run}", flush=True)
         if not a.attach:
-            upload_and_start(a, ssh, extra, py)
+            upload_and_start(a, ssh, extra, remote_py)
         watch_download(a, ssh, iid, t_start, deadline, dph, local_out)
     except KeyboardInterrupt:
         print("\nInterrupted.", flush=True)
@@ -170,7 +170,7 @@ def main():
             print("\n" + open(summ).read())
 
 
-def upload_and_start(a, ssh, extra, py):
+def upload_and_start(a, ssh, extra, remote_py):
         print("  ssh ok; uploading (~340 MB)...", flush=True)
         t = time.time()
         tar = subprocess.Popen(["tar", "cf", "-", *UPLOAD], stdout=subprocess.PIPE)
@@ -178,17 +178,18 @@ def upload_and_start(a, ssh, extra, py):
         tar.wait()
         print(f"  uploaded in {time.time() - t:.0f}s", flush=True)
 
+        print("  installing packages on the server...", flush=True)
+        py = remote_py["python"]
+        remote_py.update(install_packages(ssh, py, remote_py["torch"], log=f"{REMOTE}/pip.log"))  # also checks torch is unchanged
+        print(f"  installed; torch {remote_py['torch']}, torchvision {remote_py['torchvision']}", flush=True)
         run_args = ["--data", a.data, "--out", f"runs/{a.run}", "--steps", str(a.steps), *extra]
-        # --no-deps: never let pip replace the image's PyTorch (a multi-GB download); add only the small pieces
         # NOTE: `&` below binds to the whole && chain, so that chain is one background shell holding the ssh channel:
         # that was the "stuck at installing packages" hang (ssh waited for it). The timeout + pgrep below copes with
         # it; experiments/exp17/cloud_bench.py has the clean fix (setsid bash -c "..." > /dev/null 2>&1 < /dev/null &).
-        remote_cmd = (f"cd {REMOTE} && {py} -m pip install --no-deps spandrel==0.4.2 einops safetensors opencv-python-headless tqdm "
-                      f"> pip.log 2>&1 && {py} -c 'import spandrel, cv2, torch, torchvision; print(torch.__version__)' && "
+        remote_cmd = (f"cd {REMOTE} && {py} -c 'import spandrel, cv2, torch, torchvision; print(torch.__version__)' && "
                       f"nvidia-smi --query-gpu=name,memory.total --format=csv,noheader && "
                       f"PYTHONUNBUFFERED=1 setsid nohup {py} experiments/exp16/distill.py all {' '.join(shlex.quote(x) for x in run_args)} "
                       f"> run.log 2>&1 < /dev/null &")  # </dev/null: otherwise ssh waits for the background job and never returns
-        print("  installing packages on the server...", flush=True)
         try:  # the background job can keep the ssh channel open; a timeout here is fine if training is running
             subprocess.run(ssh + [remote_cmd], capture_output=True, text=True, timeout=600)
         except subprocess.TimeoutExpired:
