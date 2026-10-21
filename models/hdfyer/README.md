@@ -16,3 +16,7 @@ Naming: `hdfyer-2x-<size>-r<run>.pth`
 - Source checkpoint: run_20261013_0044/ckpt/final.pth of the cloud run (the run folder was cleared on 2026-10-18; this file is that checkpoint, sha256 6f5b223f...)
 - Exam (5 unseen series, 150 pages): detail better than JaNai on 140/150; ~22x faster than the teacher on the laptop
 - Known issues: smooths film grain / paper texture (L1 loss); slight colour wobble on blank areas
+- Finish (hdfyer/render/finish.py): edge-masked unsharp mask, amount 1.0, radius 0.8, then near-black cleanup.
+  Exp 21: raw output has 0.88 of the teacher's edge acutance; the finish brings it to 1.03 with no noise gain in flat
+  areas (the previous plain USM, 0.3 at radius 0.5, reached 0.93). It cannot restore texture the model smooths away.
+  The reference set of raw outputs is data/student/hdfyer-2x-s-r2-raw/ (experiments/exp21/make_student.py).

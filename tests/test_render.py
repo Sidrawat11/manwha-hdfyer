@@ -58,12 +58,12 @@ def checks() -> list[tuple[str, bool]]:
             checks.append((f"{label}: every page byte-identical to serial", overlapped == serial))
             checks.append((f"{label}: never more than {max_inflight} pages in flight", 1 <= most <= max_inflight))
 
-        # Pages are kept at their size, sharpened with radius 0.5 and cleaned up, nothing else.
+        # Pages are kept at their size, sharpened (edge-masked USM, amount 1.0, radius 0.8) and cleaned up, nothing else.
         decoded = cv2.imdecode(np.frombuffer(serial[0][1], np.uint8), cv2.IMREAD_COLOR)
         checks.append(("pages are not resized", decoded is not None and decoded.shape == (2400, 640, 3)))
-        expected = cleanup_near_black(sharpen(pages[4][1], radius=0.5))
+        expected = cleanup_near_black(sharpen(pages[4][1], amount=1.0, radius=0.8))
         ok, encoded = cv2.imencode(".jpg", expected, [cv2.IMWRITE_JPEG_QUALITY, 92])
-        checks.append(("pages: sharpen radius 0.5 then black cleanup, nothing else", ok and encoded.tobytes() == serial[4][1]))
+        checks.append(("pages: edge-masked sharpen (1.0, r0.8) then black cleanup, nothing else", ok and encoded.tobytes() == serial[4][1]))
 
         # Pages really are finished off the calling thread, and several at once.
         real_finish = finisher_module.finish_page

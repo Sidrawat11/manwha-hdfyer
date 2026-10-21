@@ -1,7 +1,7 @@
 """Exp 21 sharpeners. Each takes a uint8 BGR page (numpy) and returns one; all but the production baseline run in
 torch on the GPU (float32, 0-255). VARIANTS lists every setting the bake-off runs.
 
-    baseline   today's production finish: unsharp mask (strength 0.3, radius 0.5) + near-black cleanup
+    baseline   the production finish when Exp 21 ran: unsharp mask (strength 0.3, radius 0.5) + near-black cleanup
     usm_edge   unsharp mask on luma, applied only where there are edges (flat areas and gradients left alone)
     cas        AMD FidelityFX Contrast Adaptive Sharpening (the no-scaling CAS filter, per channel)
     warp       aWarpSharp-style: pulls pixels away from edge ridges along the gradient of a blurred edge map, so
@@ -60,9 +60,14 @@ def plain(img):
     return img
 
 
-def baseline(img):
-    from hdfyer.render.finish import SHARPEN_RADIUS, cleanup_near_black, sharpen
-    return cleanup_near_black(sharpen(img, radius=SHARPEN_RADIUS))
+def baseline(img, strength=0.3, radius=0.5, threshold=15):
+    """The production finish when Exp 21 ran (frozen here; production now uses usm_edge 1.0 r0.8): a plain unsharp
+    mask on all three channels, then pixels with every channel below 15 set to black."""
+    import cv2
+    blurred = cv2.GaussianBlur(img, (0, 0), radius)
+    out = np.clip(cv2.addWeighted(img, 1 + strength, blurred, -strength, 0), 0, 255).astype(np.uint8)
+    out[np.all(out < threshold, axis=2)] = 0
+    return out
 
 
 @torch.no_grad()
