@@ -70,6 +70,12 @@ def cleanup_near_black(image: np.ndarray, threshold: int = 15) -> np.ndarray:
 SHARPEN_AMOUNT = 1.0
 SHARPEN_RADIUS = 0.8
 
+# OpenCV threads per call while pages are finished on the worker pool. Each worker's blur/Sobel/encode fanning out
+# over every core on top of the pool oversubscribes the CPU: on Ch134 (RTX 4060 laptop, 20 cores) one thread per
+# call finished the chapter 0.2-1.3 s faster than OpenCV's default, for the old and the new finish alike, in three
+# comparisons with about 0.5 s of run-to-run noise (experiments/exp21/time_finish.py). None leaves OpenCV alone.
+WORKER_OPENCV_THREADS = 1
+
 
 def finish_page(page: np.ndarray, packager: Packager) -> bytes:
     """Sharpens and cleans up a stitched 2x page and returns it encoded in the packager's format."""
@@ -86,6 +92,8 @@ class PageFinisher:
             raise ValueError("workers and max_inflight must be at least 1")
         self.packager = packager
         self.max_inflight = max_inflight
+        if overlap and WORKER_OPENCV_THREADS is not None:
+            cv2.setNumThreads(WORKER_OPENCV_THREADS)   # process-wide; the worker pool is the parallelism
         self._executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="finish") if overlap else None
         self._pending = deque()   # (page name, future) in submission order
 

@@ -1,0 +1,7 @@
+measure,variant,ms,ms_per_mpx
+"finish per page, 1 thread",old,253.0,18.1
+"finish per page, 1 thread",new,312.0,22.31
+"finish per page, 1 thread","new USM, old cleanup",495.8,35.46
+"Ch134 chapter wall time, ms (median of 3)","before: old finish, OpenCV default threads",7085,
+"Ch134 chapter wall time, ms (median of 3)","new finish, OpenCV default threads",8098,
+"Ch134 chapter wall time, ms (median of 3)","now: new finish, 1 OpenCV thread per worker",7858,
