@@ -1,0 +1,286 @@
+{
+ "note": "Exp 21 bake-off pages: full pages, chosen by content measures then checked by eye; credit pages excluded. Paths are relative to data/teacher/ultrasharp-2x and data/student/hdfyer-2x-s-r2-raw.",
+ "pages": [
+  {
+   "page": "training-v3/L1/Chapter 81_bf09a4/011__002.png",
+   "set": "training-v3",
+   "label": "L1",
+   "content": [
+    "line art",
+    "faces",
+    "lettering/SFX",
+    "action effects"
+   ],
+   "size": [
+    800,
+    5592
+   ]
+  },
+  {
+   "page": "training-v3/L1/Chapter 89_66dd51/010__002.png",
+   "set": "training-v3",
+   "label": "L1",
+   "content": [
+    "gradients (mist)",
+    "texture (foliage)",
+    "small lettering"
+   ],
+   "size": [
+    800,
+    3924
+   ]
+  },
+  {
+   "page": "training-v3/L1/Chapter 95_19c596/011__001.png",
+   "set": "training-v3",
+   "label": "L1",
+   "content": [
+    "faces",
+    "gradients (fire)",
+    "lettering"
+   ],
+   "size": [
+    800,
+    4398
+   ]
+  },
+  {
+   "page": "training-v3/L2/HiveToons_Chapter 28_3f0a4d/003__002.png",
+   "set": "training-v3",
+   "label": "L2",
+   "content": [
+    "face",
+    "flat colour",
+    "line art"
+   ],
+   "size": [
+    690,
+    4000
+   ]
+  },
+  {
+   "page": "training-v3/L2/UTOON_Chapter 120_502054/016__001.png",
+   "set": "training-v3",
+   "label": "L2",
+   "content": [
+    "faces",
+    "texture",
+    "SFX lettering",
+    "painted"
+   ],
+   "size": [
+    1080,
+    3411
+   ]
+  },
+  {
+   "page": "training-v3/L2/UTOON_Chapter 146_b91b56/016.png",
+   "set": "training-v3",
+   "label": "L2",
+   "content": [
+    "flat colour",
+    "lettering",
+    "line art"
+   ],
+   "size": [
+    709,
+    2000
+   ]
+  },
+  {
+   "page": "training-v3/L3/Chapter 101_1e4d21/012__003.png",
+   "set": "training-v3",
+   "label": "L3",
+   "content": [
+    "gradients (cold light)",
+    "texture (snow)",
+    "lettering"
+   ],
+   "size": [
+    800,
+    4240
+   ]
+  },
+  {
+   "page": "training-v3/L3/Chapter 10_01c0d1/011__002.png",
+   "set": "training-v3",
+   "label": "L3",
+   "content": [
+    "flat colour",
+    "lettering",
+    "line art (small figures)"
+   ],
+   "size": [
+    760,
+    5334
+   ]
+  },
+  {
+   "page": "training-v3/L3/Chapter 123_a1683d/008__001.png",
+   "set": "training-v3",
+   "label": "L3",
+   "content": [
+    "faces",
+    "gradients (painted light)",
+    "lettering"
+   ],
+   "size": [
+    800,
+    4711
+   ]
+  },
+  {
+   "page": "exams/A/020.png",
+   "set": "exams",
+   "label": "A",
+   "content": [
+    "face (detailed)",
+    "ornament line art",
+    "lettering"
+   ],
+   "size": [
+    1400,
+    2655
+   ]
+  },
+  {
+   "page": "exams/A/025.png",
+   "set": "exams",
+   "label": "A",
+   "content": [
+    "face",
+    "soft gradients",
+    "lettering"
+   ],
+   "size": [
+    1400,
+    2308
+   ]
+  },
+  {
+   "page": "exams/B/007.png",
+   "set": "exams",
+   "label": "B",
+   "content": [
+    "face",
+    "lettering",
+    "flat colour"
+   ],
+   "size": [
+    700,
+    954
+   ]
+  },
+  {
+   "page": "exams/B/018.png",
+   "set": "exams",
+   "label": "B",
+   "content": [
+    "line art (speed lines)",
+    "SFX lettering",
+    "flat colour"
+   ],
+   "size": [
+    700,
+    820
+   ]
+  },
+  {
+   "page": "exams/C/001.png",
+   "set": "exams",
+   "label": "C",
+   "content": [
+    "gradients (fabric)",
+    "lettering",
+    "flat colour"
+   ],
+   "size": [
+    720,
+    641
+   ]
+  },
+  {
+   "page": "exams/C/022.png",
+   "set": "exams",
+   "label": "C",
+   "content": [
+    "texture (effects)",
+    "SFX lettering",
+    "gradients"
+   ],
+   "size": [
+    720,
+    4000
+   ]
+  },
+  {
+   "page": "exams/D/002.png",
+   "set": "exams",
+   "label": "D",
+   "content": [
+    "lettering (UI text)",
+    "texture overlay"
+   ],
+   "size": [
+    700,
+    980
+   ]
+  },
+  {
+   "page": "exams/D/007.png",
+   "set": "exams",
+   "label": "D",
+   "content": [
+    "face",
+    "texture overlay",
+    "SFX lettering"
+   ],
+   "size": [
+    700,
+    1043
+   ]
+  },
+  {
+   "page": "exams/D/010.png",
+   "set": "exams",
+   "label": "D",
+   "content": [
+    "texture overlay",
+    "gradients",
+    "SFX lettering"
+   ],
+   "size": [
+    700,
+    1050
+   ]
+  },
+  {
+   "page": "exams/E/000.png",
+   "set": "exams",
+   "label": "E",
+   "content": [
+    "faces",
+    "line art",
+    "lettering (manhua)"
+   ],
+   "size": [
+    1200,
+    1697
+   ]
+  },
+  {
+   "page": "exams/E/004.png",
+   "set": "exams",
+   "label": "E",
+   "content": [
+    "gradients (sky)",
+    "dense lettering",
+    "line art (architecture)"
+   ],
+   "size": [
+    1200,
+    1697
+   ]
+  }
+ ]
+}
