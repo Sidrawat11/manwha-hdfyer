@@ -507,8 +507,132 @@
                     }
                 },
                 "stopped": "all batch sizes measured"
+            },
+            "710": {
+                "best_batch": 8,
+                "batches": {
+                    "1": {
+                        "ms_per_strip": 95.33,
+                        "peak_vram_mb": 673
+                    },
+                    "2": {
+                        "ms_per_strip": 113.47,
+                        "peak_vram_mb": 1340
+                    },
+                    "4": {
+                        "ms_per_strip": 128.24,
+                        "peak_vram_mb": 2676
+                    },
+                    "8": {
+                        "ms_per_strip": 76.68,
+                        "peak_vram_mb": 5347
+                    }
+                },
+                "stopped": "all batch sizes measured"
+            },
+            "436": {
+                "best_batch": 1,
+                "batches": {
+                    "1": {
+                        "ms_per_strip": 30.44,
+                        "peak_vram_mb": 415
+                    },
+                    "2": {
+                        "ms_per_strip": 36.38,
+                        "peak_vram_mb": 825
+                    },
+                    "4": {
+                        "ms_per_strip": 42.35,
+                        "peak_vram_mb": 1645
+                    },
+                    "8": {
+                        "ms_per_strip": 40.63,
+                        "peak_vram_mb": 3285
+                    }
+                },
+                "stopped": "all batch sizes measured"
+            },
+            "760": {
+                "best_batch": 1,
+                "batches": {
+                    "1": {
+                        "ms_per_strip": 54.58,
+                        "peak_vram_mb": 720
+                    },
+                    "2": {
+                        "ms_per_strip": 54.53,
+                        "peak_vram_mb": 1434
+                    },
+                    "4": {
+                        "ms_per_strip": 54.17,
+                        "peak_vram_mb": 2864
+                    },
+                    "8": {
+                        "ms_per_strip": 53.97,
+                        "peak_vram_mb": 5723
+                    }
+                },
+                "stopped": "all batch sizes measured"
+            },
+            "900": {
+                "best_batch": 1,
+                "batches": {
+                    "1": {
+                        "ms_per_strip": 64.76,
+                        "peak_vram_mb": 851
+                    },
+                    "2": {
+                        "ms_per_strip": 64.42,
+                        "peak_vram_mb": 1698
+                    },
+                    "4": {
+                        "ms_per_strip": 64.11,
+                        "peak_vram_mb": 3391
+                    }
+                },
+                "stopped": "batch 8 would need about 6782 MB, over the 6141 MB cap"
+            },
+            "1500": {
+                "best_batch": 1,
+                "batches": {
+                    "1": {
+                        "ms_per_strip": 107.66,
+                        "peak_vram_mb": 1416
+                    },
+                    "2": {
+                        "ms_per_strip": 107.18,
+                        "peak_vram_mb": 2826
+                    },
+                    "4": {
+                        "ms_per_strip": 106.7,
+                        "peak_vram_mb": 5648
+                    }
+                },
+                "stopped": "batch 8 would need about 11296 MB, over the 6141 MB cap"
+            },
+            "700": {
+                "best_batch": 1,
+                "batches": {
+                    "1": {
+                        "ms_per_strip": 49.29,
+                        "peak_vram_mb": 663
+                    },
+                    "2": {
+                        "ms_per_strip": 50.3,
+                        "peak_vram_mb": 1322
+                    },
+                    "4": {
+                        "ms_per_strip": 49.98,
+                        "peak_vram_mb": 2638
+                    },
+                    "8": {
+                        "ms_per_strip": 49.73,
+                        "peak_vram_mb": 5271
+                    }
+                },
+                "stopped": "all batch sizes measured"
             }
         },
-        "profiled_at": "2026-10-13 23:27:19"
+        "profiled_at": "2026-10-20 21:07:42"
     }
 }
